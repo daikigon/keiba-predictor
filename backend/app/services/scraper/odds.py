@@ -8,6 +8,7 @@ class OddsScraper(BaseScraper):
     """Scraper for odds page"""
 
     BASE_URL = "https://race.netkeiba.com/odds/index.html"
+    HTML_SUBDIR = "odds"
 
     def scrape(self, race_id: str) -> dict:
         """
@@ -20,7 +21,7 @@ class OddsScraper(BaseScraper):
             Odds dictionary
         """
         url = f"{self.BASE_URL}?race_id={race_id}"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=f"{race_id}_win")
         soup = self.parse_html(html)
 
         return {
@@ -75,7 +76,7 @@ class OddsScraper(BaseScraper):
     def _scrape_quinella(self, race_id: str) -> list[dict]:
         """Scrape quinella (馬連) odds"""
         url = f"https://race.netkeiba.com/odds/index.html?type=b4&race_id={race_id}"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=f"{race_id}_quinella")
         soup = self.parse_html(html)
 
         return self._parse_combination_odds(soup, 2)
@@ -83,7 +84,7 @@ class OddsScraper(BaseScraper):
     def _scrape_quinella_place(self, race_id: str) -> list[dict]:
         """Scrape quinella place (ワイド) odds"""
         url = f"https://race.netkeiba.com/odds/index.html?type=b5&race_id={race_id}"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=f"{race_id}_quinella_place")
         soup = self.parse_html(html)
 
         return self._parse_combination_odds(soup, 2, has_range=True)
@@ -91,7 +92,7 @@ class OddsScraper(BaseScraper):
     def _scrape_exacta(self, race_id: str) -> list[dict]:
         """Scrape exacta (馬単) odds"""
         url = f"https://race.netkeiba.com/odds/index.html?type=b6&race_id={race_id}"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=f"{race_id}_exacta")
         soup = self.parse_html(html)
 
         return self._parse_combination_odds(soup, 2)
@@ -99,7 +100,7 @@ class OddsScraper(BaseScraper):
     def _scrape_trio(self, race_id: str) -> list[dict]:
         """Scrape trio (三連複) odds"""
         url = f"https://race.netkeiba.com/odds/index.html?type=b7&race_id={race_id}"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=f"{race_id}_trio")
         soup = self.parse_html(html)
 
         return self._parse_combination_odds(soup, 3)
@@ -107,7 +108,7 @@ class OddsScraper(BaseScraper):
     def _scrape_trifecta(self, race_id: str) -> list[dict]:
         """Scrape trifecta (三連単) odds"""
         url = f"https://race.netkeiba.com/odds/index.html?type=b8&race_id={race_id}"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=f"{race_id}_trifecta")
         soup = self.parse_html(html)
 
         return self._parse_combination_odds(soup, 3)

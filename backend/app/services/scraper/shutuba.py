@@ -15,13 +15,18 @@ class RaceCardListScraper(BaseScraper):
 
     # Use the sub endpoint which contains the actual race data (main page loads via AJAX)
     BASE_URL = "https://race.netkeiba.com/top/race_list_sub.html"
+    HTML_SUBDIR = "shutuba_lists"
 
-    def scrape(self, target_date: date) -> list[dict]:
+    # JRA course codes (central racing)
+    JRA_COURSE_CODES = {"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"}
+
+    def scrape(self, target_date: date, jra_only: bool = False) -> list[dict]:
         """
         Scrape race list for a given date from race.netkeiba.com
 
         Args:
             target_date: Target date to scrape
+            jra_only: If True, only return JRA (central racing) races
 
         Returns:
             List of race info dictionaries with race_id and basic info
@@ -29,7 +34,7 @@ class RaceCardListScraper(BaseScraper):
         date_str = target_date.strftime("%Y%m%d")
         url = f"{self.BASE_URL}?kaisai_date={date_str}"
 
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=date_str)
         soup = self.parse_html(html)
 
         races = []
@@ -44,6 +49,9 @@ class RaceCardListScraper(BaseScraper):
             if race_id_match:
                 race_id = race_id_match.group(1)
                 if race_id not in seen_ids:
+                    # Filter by JRA if requested
+                    if jra_only and not self._is_jra_race(race_id):
+                        continue
                     seen_ids.add(race_id)
 
                     # Extract race info from link text or parent elements
@@ -72,6 +80,13 @@ class RaceCardListScraper(BaseScraper):
         "09": "阪神", "10": "小倉",
     }
 
+    def _is_jra_race(self, race_id: str) -> bool:
+        """Check if race is JRA (central racing) based on course code"""
+        if len(race_id) >= 6:
+            course_code = race_id[4:6]
+            return course_code in self.JRA_COURSE_CODES
+        return False
+
     def _get_course_from_id(self, race_id: str) -> str:
         """Extract course name from race_id"""
         if len(race_id) >= 6:
@@ -93,6 +108,7 @@ class RaceCardScraper(BaseScraper):
     """Scraper for race card (shutuba/出馬表) from race.netkeiba.com"""
 
     BASE_URL = "https://race.netkeiba.com/race/shutuba.html"
+    HTML_SUBDIR = "shutuba"
 
     # Course code mapping
     COURSE_CODES = {
@@ -112,7 +128,7 @@ class RaceCardScraper(BaseScraper):
             Race detail dictionary with entries
         """
         url = f"{self.BASE_URL}?race_id={race_id}"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=race_id)
         soup = self.parse_html(html)
 
         race_info = self._parse_race_info(soup, race_id)

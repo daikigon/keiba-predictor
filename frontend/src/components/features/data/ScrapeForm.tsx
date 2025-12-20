@@ -24,6 +24,7 @@ import {
 
 type ScrapeStatus = 'idle' | 'scraping_list' | 'scraping_details' | 'completed' | 'error';
 type ScrapeMode = 'past' | 'today';
+type DateMode = 'single' | 'range';
 
 interface ScrapeProgress {
   total: number;
@@ -31,6 +32,10 @@ interface ScrapeProgress {
   currentRace: string;
   skipped: number;
   scraped: number;
+  // For range mode
+  currentDate?: string;
+  totalDates?: number;
+  currentDateIndex?: number;
 }
 
 interface SkippedRace {
@@ -66,12 +71,30 @@ function saveHistory(history: ScrapeHistory[]) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, MAX_HISTORY)));
 }
 
+function getDateRange(startDate: string, endDate: string): string[] {
+  const dates: string[] = [];
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    dates.push(d.toISOString().split('T')[0]);
+  }
+  return dates;
+}
+
 export function ScrapeForm() {
   const [targetDate, setTargetDate] = useState(() => {
     const today = new Date();
     return today.toISOString().split('T')[0];
   });
+  const [endDate, setEndDate] = useState(() => {
+    const today = new Date();
+    return today.toISOString().split('T')[0];
+  });
   const [mode, setMode] = useState<ScrapeMode>('today');
+  const [dateMode, setDateMode] = useState<DateMode>('single');
+  const [jraOnly, setJraOnly] = useState(false);
+  const [forceOverwrite, setForceOverwrite] = useState(false);
   const [status, setStatus] = useState<ScrapeStatus>('idle');
   const [progress, setProgress] = useState<ScrapeProgress | null>(null);
   const [result, setResult] = useState<{
@@ -116,90 +139,102 @@ export function ScrapeForm() {
     const scrapeList = mode === 'today' ? scrapeRaceCardList : scrapeRaceList;
     const scrapeDetail = mode === 'today' ? scrapeRaceCardDetail : scrapeRaceDetail;
 
+    // Get dates to process
+    const datesToProcess = dateMode === 'range' ? getDateRange(targetDate, endDate) : [targetDate];
+    const totalDates = datesToProcess.length;
+
     try {
-      // Step 1: Scrape race list
-      const listResult = await scrapeList(targetDate);
+      let totalRacesCount = 0;
+      let totalEntriesCount = 0;
+      let totalSkippedCount = 0;
+      let totalScrapedCount = 0;
+      const allSkippedRaces: SkippedRace[] = [];
+      const allErrors: string[] = [];
 
-      if (listResult.races_count === 0) {
-        setStatus('completed');
-        setResult({
-          racesCount: 0,
-          scrapedCount: 0,
-          skippedCount: 0,
-          entriesCount: 0,
-          skippedRaces: [],
-          errors: [],
-        });
-        addToHistory({
-          date: targetDate,
-          scrapedAt: new Date().toISOString(),
-          racesCount: 0,
-          scrapedCount: 0,
-          skippedCount: 0,
-          mode,
-        });
-        return;
-      }
+      for (let dateIndex = 0; dateIndex < datesToProcess.length; dateIndex++) {
+        const currentDate = datesToProcess[dateIndex];
 
-      // Step 2: Scrape each race detail
-      setStatus('scraping_details');
-      const races = listResult.races;
-      let entriesCount = 0;
-      let skippedCount = 0;
-      let scrapedCount = 0;
-      const skippedRaces: SkippedRace[] = [];
-      const errors: string[] = [];
-
-      for (let i = 0; i < races.length; i++) {
-        const race = races[i];
+        // Step 1: Scrape race list for this date
+        setStatus('scraping_list');
         setProgress({
-          total: races.length,
-          current: i + 1,
-          currentRace: race.race_name || race.race_id,
-          skipped: skippedCount,
-          scraped: scrapedCount,
+          total: 0,
+          current: 0,
+          currentRace: '',
+          skipped: totalSkippedCount,
+          scraped: totalScrapedCount,
+          currentDate,
+          totalDates,
+          currentDateIndex: dateIndex + 1,
         });
 
-        try {
-          const detailResult = await scrapeDetail(race.race_id);
+        const listResult = await scrapeList(currentDate, jraOnly);
 
-          if (detailResult.skipped) {
-            skippedCount++;
-            skippedRaces.push({
-              race_id: detailResult.race.race_id,
-              race_name: detailResult.race.race_name,
-              entries_count: detailResult.race.entries_count || 0,
-            });
-          } else {
-            scrapedCount++;
-            entriesCount += detailResult.race.entries?.length || 0;
-          }
-        } catch (e) {
-          errors.push(`${race.race_id}: ${e instanceof Error ? e.message : 'Unknown error'}`);
+        if (listResult.races_count === 0) {
+          // No races for this date, continue to next
+          continue;
         }
 
-        // Rate limiting
-        if (i < races.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 500));
+        totalRacesCount += listResult.races_count;
+
+        // Step 2: Scrape each race detail
+        setStatus('scraping_details');
+        const races = listResult.races;
+
+        for (let i = 0; i < races.length; i++) {
+          const race = races[i];
+          setProgress({
+            total: races.length,
+            current: i + 1,
+            currentRace: race.race_name || race.race_id,
+            skipped: totalSkippedCount,
+            scraped: totalScrapedCount,
+            currentDate,
+            totalDates,
+            currentDateIndex: dateIndex + 1,
+          });
+
+          try {
+            const detailResult = await scrapeDetail(race.race_id, forceOverwrite);
+
+            if (detailResult.skipped) {
+              totalSkippedCount++;
+              allSkippedRaces.push({
+                race_id: detailResult.race.race_id,
+                race_name: detailResult.race.race_name,
+                entries_count: detailResult.race.entries_count || 0,
+              });
+            } else {
+              totalScrapedCount++;
+              totalEntriesCount += detailResult.race.entries?.length || 0;
+            }
+          } catch (e) {
+            allErrors.push(`${race.race_id}: ${e instanceof Error ? e.message : 'Unknown error'}`);
+          }
+
+          // Rate limiting
+          if (i < races.length - 1 || dateIndex < datesToProcess.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
         }
       }
 
       setStatus('completed');
       setResult({
-        racesCount: listResult.races_count,
-        scrapedCount,
-        skippedCount,
-        entriesCount,
-        skippedRaces,
-        errors,
+        racesCount: totalRacesCount,
+        scrapedCount: totalScrapedCount,
+        skippedCount: totalSkippedCount,
+        entriesCount: totalEntriesCount,
+        skippedRaces: allSkippedRaces,
+        errors: allErrors,
       });
 
+      // Add to history (for range mode, use start date)
       addToHistory({
-        date: targetDate,
+        date: dateMode === 'range' ? `${targetDate}~${endDate}` : targetDate,
         scrapedAt: new Date().toISOString(),
-        racesCount: listResult.races_count,
-        scrapedCount,
-        skippedCount,
+        racesCount: totalRacesCount,
+        scrapedCount: totalScrapedCount,
+        skippedCount: totalSkippedCount,
         mode,
       });
     } catch (e) {
@@ -211,6 +246,13 @@ export function ScrapeForm() {
   const isLoading = status === 'scraping_list' || status === 'scraping_details';
 
   const formatDate = (dateStr: string) => {
+    // Handle range format like "2024-12-01~2024-12-15"
+    if (dateStr.includes('~')) {
+      const [start, end] = dateStr.split('~');
+      const startDate = new Date(start);
+      const endDate = new Date(end);
+      return `${startDate.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' })}~${endDate.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' })}`;
+    }
     const date = new Date(dateStr);
     return date.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
   };
@@ -271,19 +313,96 @@ export function ScrapeForm() {
             </p>
           </div>
 
-          {/* Date Selection */}
+          {/* Date Mode Selection */}
           <div>
-            <label htmlFor="target-date" className="block text-sm font-medium text-gray-700 mb-1">
-              取得対象日
-            </label>
+            <label className="block text-sm font-medium text-gray-700 mb-2">日付指定方法</label>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setDateMode('single')}
+                disabled={isLoading}
+                className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                  dateMode === 'single'
+                    ? 'bg-green-50 border-green-300 text-green-700'
+                    : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
+                } disabled:opacity-50`}
+              >
+                単一日
+              </button>
+              <button
+                onClick={() => setDateMode('range')}
+                disabled={isLoading}
+                className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                  dateMode === 'range'
+                    ? 'bg-green-50 border-green-300 text-green-700'
+                    : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
+                } disabled:opacity-50`}
+              >
+                日付範囲
+              </button>
+            </div>
+          </div>
+
+          {/* Date Selection */}
+          <div className={dateMode === 'range' ? 'grid grid-cols-2 gap-4' : ''}>
+            <div>
+              <label htmlFor="target-date" className="block text-sm font-medium text-gray-700 mb-1">
+                {dateMode === 'range' ? '開始日' : '取得対象日'}
+              </label>
+              <input
+                type="date"
+                id="target-date"
+                value={targetDate}
+                onChange={(e) => setTargetDate(e.target.value)}
+                disabled={isLoading}
+                className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
+              />
+            </div>
+            {dateMode === 'range' && (
+              <div>
+                <label htmlFor="end-date" className="block text-sm font-medium text-gray-700 mb-1">
+                  終了日
+                </label>
+                <input
+                  type="date"
+                  id="end-date"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  disabled={isLoading}
+                  min={targetDate}
+                  className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* JRA Only Option */}
+          <div className="flex items-center gap-2">
             <input
-              type="date"
-              id="target-date"
-              value={targetDate}
-              onChange={(e) => setTargetDate(e.target.value)}
+              type="checkbox"
+              id="jra-only"
+              checked={jraOnly}
+              onChange={(e) => setJraOnly(e.target.checked)}
               disabled={isLoading}
-              className="block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-100"
+              className="h-4 w-4 text-green-600 border-gray-300 rounded focus:ring-green-500 disabled:opacity-50"
             />
+            <label htmlFor="jra-only" className="text-sm text-gray-700">
+              中央競馬のみ取得（地方競馬を除外）
+            </label>
+          </div>
+
+          {/* Force Overwrite Option */}
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="force-overwrite"
+              checked={forceOverwrite}
+              onChange={(e) => setForceOverwrite(e.target.checked)}
+              disabled={isLoading}
+              className="h-4 w-4 text-blue-600 border-gray-300 rounded focus:ring-blue-500 disabled:opacity-50"
+            />
+            <label htmlFor="force-overwrite" className="text-sm text-gray-700">
+              既存データを上書き更新（オッズ更新など）
+            </label>
           </div>
 
           {/* History */}
@@ -307,12 +426,23 @@ export function ScrapeForm() {
                   <button
                     key={`${h.date}-${h.mode}-${idx}`}
                     onClick={() => {
-                      setTargetDate(h.date);
+                      // Handle range format like "2024-12-01~2024-12-15"
+                      if (h.date.includes('~')) {
+                        const [start, end] = h.date.split('~');
+                        setTargetDate(start);
+                        setEndDate(end);
+                        setDateMode('range');
+                      } else {
+                        setTargetDate(h.date);
+                        setDateMode('single');
+                      }
                       setMode(h.mode);
                     }}
                     disabled={isLoading}
                     className={`px-2 py-1 text-xs rounded border transition-colors ${
-                      targetDate === h.date && mode === h.mode
+                      ((h.date.includes('~') && dateMode === 'range' && h.date === `${targetDate}~${endDate}`) ||
+                       (!h.date.includes('~') && dateMode === 'single' && h.date === targetDate)) &&
+                      mode === h.mode
                         ? 'bg-blue-100 border-blue-300 text-blue-700'
                         : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'
                     } disabled:opacity-50`}
@@ -350,28 +480,54 @@ export function ScrapeForm() {
           </Button>
 
           {/* Progress */}
-          {progress && status === 'scraping_details' && (
+          {progress && (status === 'scraping_list' || status === 'scraping_details') && (
             <div className="p-4 bg-blue-50 rounded-lg">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-sm font-medium text-blue-700">
-                  {progress.current} / {progress.total} レース
-                </span>
-                <span className="text-sm text-blue-600">
-                  {Math.round((progress.current / progress.total) * 100)}%
-                </span>
-              </div>
-              <div className="w-full bg-blue-200 rounded-full h-2">
-                <div
-                  className="bg-blue-600 h-2 rounded-full transition-all"
-                  style={{ width: `${(progress.current / progress.total) * 100}%` }}
-                />
-              </div>
-              <div className="mt-2 flex justify-between text-xs">
-                <span className="text-blue-600 truncate flex-1">処理中: {progress.currentRace}</span>
-                <span className="text-gray-500 ml-2">
-                  取得: {progress.scraped} / スキップ: {progress.skipped}
-                </span>
-              </div>
+              {/* Date progress for range mode */}
+              {progress.totalDates && progress.totalDates > 1 && (
+                <div className="mb-3 pb-3 border-b border-blue-200">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-sm font-medium text-blue-700">
+                      日付: {progress.currentDateIndex} / {progress.totalDates} ({progress.currentDate})
+                    </span>
+                  </div>
+                  <div className="w-full bg-blue-200 rounded-full h-1.5">
+                    <div
+                      className="bg-blue-400 h-1.5 rounded-full transition-all"
+                      style={{ width: `${((progress.currentDateIndex || 0) / progress.totalDates) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+              {status === 'scraping_details' && progress.total > 0 && (
+                <>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-blue-700">
+                      {progress.current} / {progress.total} レース
+                    </span>
+                    <span className="text-sm text-blue-600">
+                      {Math.round((progress.current / progress.total) * 100)}%
+                    </span>
+                  </div>
+                  <div className="w-full bg-blue-200 rounded-full h-2">
+                    <div
+                      className="bg-blue-600 h-2 rounded-full transition-all"
+                      style={{ width: `${(progress.current / progress.total) * 100}%` }}
+                    />
+                  </div>
+                  <div className="mt-2 flex justify-between text-xs">
+                    <span className="text-blue-600 truncate flex-1">処理中: {progress.currentRace}</span>
+                    <span className="text-gray-500 ml-2">
+                      取得: {progress.scraped} / スキップ: {progress.skipped}
+                    </span>
+                  </div>
+                </>
+              )}
+              {status === 'scraping_list' && (
+                <div className="text-sm text-blue-700">
+                  レース一覧を取得中...
+                  {progress.currentDate && ` (${progress.currentDate})`}
+                </div>
+              )}
             </div>
           )}
 
@@ -456,12 +612,13 @@ export function ScrapeForm() {
           )}
 
           {/* Warning */}
-          <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <div className={`p-3 border rounded-lg ${forceOverwrite ? 'bg-orange-50 border-orange-200' : 'bg-yellow-50 border-yellow-200'}`}>
             <div className="flex items-start gap-2">
-              <AlertCircle className="w-4 h-4 text-yellow-600 flex-shrink-0 mt-0.5" />
-              <p className="text-xs text-yellow-700">
-                既に出走馬データがあるレースは自動的にスキップされます。
-                全レースの取得には数分かかる場合があります。
+              <AlertCircle className={`w-4 h-4 flex-shrink-0 mt-0.5 ${forceOverwrite ? 'text-orange-600' : 'text-yellow-600'}`} />
+              <p className={`text-xs ${forceOverwrite ? 'text-orange-700' : 'text-yellow-700'}`}>
+                {forceOverwrite
+                  ? '上書きモード: 既存データを最新の情報で上書きします。全レースの取得には数分かかる場合があります。'
+                  : '既に出走馬データがあるレースは自動的にスキップされます。全レースの取得には数分かかる場合があります。'}
               </p>
             </div>
           </div>

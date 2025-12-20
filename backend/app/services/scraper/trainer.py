@@ -8,6 +8,7 @@ class TrainerScraper(BaseScraper):
     """Scraper for trainer detail page"""
 
     BASE_URL = "https://db.netkeiba.com/trainer"
+    HTML_SUBDIR = "trainers"
 
     def scrape(self, trainer_id: str) -> dict:
         """
@@ -20,7 +21,7 @@ class TrainerScraper(BaseScraper):
             Trainer info dictionary
         """
         url = f"{self.BASE_URL}/{trainer_id}/"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=trainer_id)
         soup = self.parse_html(html)
 
         trainer_info = {"trainer_id": trainer_id}

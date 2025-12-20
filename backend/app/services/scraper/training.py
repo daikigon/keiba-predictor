@@ -9,6 +9,7 @@ class TrainingScraper(BaseScraper):
 
     # Training data page for a race
     BASE_URL = "https://race.netkeiba.com/race/oikiri.html"
+    HTML_SUBDIR = "training"
 
     def scrape(self, race_id: str) -> list[dict]:
         """
@@ -21,7 +22,7 @@ class TrainingScraper(BaseScraper):
             List of training data dictionaries for each horse
         """
         url = f"{self.BASE_URL}?race_id={race_id}"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=race_id)
         soup = self.parse_html(html)
 
         training_data = []
@@ -114,7 +115,7 @@ class TrainingScraper(BaseScraper):
             List of training records
         """
         url = f"https://db.netkeiba.com/horse/{horse_id}/"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=f"horse_{horse_id}")
         soup = self.parse_html(html)
 
         training_records = []

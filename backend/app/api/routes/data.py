@@ -178,6 +178,7 @@ async def get_odds_data(
 async def scrape_races(
     target_date: str = Query(..., description="Target date (YYYY-MM-DD)"),
     skip_existing: bool = Query(True, description="Skip existing races"),
+    force: bool = Query(False, description="Force overwrite existing races (overrides skip_existing)"),
     db: Session = Depends(get_db),
 ):
     """
@@ -185,17 +186,22 @@ async def scrape_races(
 
     netkeibaから指定日のレース一覧を取得し、各レースの詳細情報と
     出走馬・騎手情報をDBに保存します。
+
+    - skip_existing=True (default): 既存レースをスキップ
+    - force=True: 既存レースを上書き更新（当日のオッズ更新などに使用）
     """
     try:
         parsed_date = datetime.strptime(target_date, "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    logger.info(f"Starting race scraping for {target_date}")
+    # force=Trueの場合はskip_existingを無視
+    actual_skip = False if force else skip_existing
+    logger.info(f"Starting race scraping for {target_date} (force={force}, skip_existing={actual_skip})")
 
     try:
         result = scraper_service.scrape_races_for_date(
-            db, parsed_date, skip_existing=skip_existing
+            db, parsed_date, skip_existing=actual_skip
         )
         logger.info(
             f"Race scraping completed: {result.success_count} saved, "

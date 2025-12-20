@@ -8,6 +8,7 @@ class JockeyScraper(BaseScraper):
     """Scraper for jockey detail page"""
 
     BASE_URL = "https://db.netkeiba.com/jockey"
+    HTML_SUBDIR = "jockeys"
 
     def scrape(self, jockey_id: str) -> dict:
         """
@@ -20,7 +21,7 @@ class JockeyScraper(BaseScraper):
             Jockey info dictionary
         """
         url = f"{self.BASE_URL}/{jockey_id}/"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=jockey_id)
         soup = self.parse_html(html)
 
         jockey_info = {"jockey_id": jockey_id}

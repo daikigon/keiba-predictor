@@ -93,6 +93,7 @@ async def get_race(
 async def scrape_races(
     target_date: str = Query(..., description="Date in YYYY-MM-DD format"),
     save_to_db: bool = Query(False, description="Save to database"),
+    jra_only: bool = Query(False, description="Only scrape JRA (central racing) races"),
     db: Session = Depends(get_db),
 ):
     """Scrape races for a given date"""
@@ -102,7 +103,7 @@ async def scrape_races(
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
     scraper = RaceListScraper()
-    races = scraper.scrape(parsed_date)
+    races = scraper.scrape(parsed_date, jra_only=jra_only)
 
     saved_count = 0
     if save_to_db:
@@ -124,11 +125,14 @@ async def scrape_race_detail(
     race_id: str,
     save_to_db: bool = Query(True, description="Save to database"),
     skip_existing: bool = Query(True, description="Skip if race already has entries"),
+    force: bool = Query(False, description="Force overwrite existing data"),
     db: Session = Depends(get_db),
 ):
     """Scrape race detail and save to database"""
+    # force=Trueの場合はスキップしない
+    actual_skip = False if force else skip_existing
     # Check if race already exists with entries
-    if skip_existing:
+    if actual_skip:
         existing_race = race_service.get_race_by_id(db, race_id)
         if existing_race and len(existing_race.entries) > 0:
             return {
@@ -163,6 +167,7 @@ async def scrape_race_detail(
 async def scrape_race_cards(
     target_date: str = Query(..., description="Date in YYYY-MM-DD format"),
     save_to_db: bool = Query(True, description="Save to database"),
+    jra_only: bool = Query(False, description="Only scrape JRA (central racing) races"),
     db: Session = Depends(get_db),
 ):
     """Scrape race cards (出馬表) from race.netkeiba.com for today/upcoming races"""
@@ -172,7 +177,7 @@ async def scrape_race_cards(
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
     scraper = RaceCardListScraper()
-    races = scraper.scrape(parsed_date)
+    races = scraper.scrape(parsed_date, jra_only=jra_only)
 
     saved_count = 0
     if save_to_db:
@@ -195,11 +200,14 @@ async def scrape_race_card_detail(
     race_id: str,
     save_to_db: bool = Query(True, description="Save to database"),
     skip_existing: bool = Query(True, description="Skip if race already has entries"),
+    force: bool = Query(False, description="Force overwrite existing data"),
     db: Session = Depends(get_db),
 ):
     """Scrape race card detail (出馬表) from race.netkeiba.com"""
+    # force=Trueの場合はスキップしない
+    actual_skip = False if force else skip_existing
     # Check if race already exists with entries
-    if skip_existing:
+    if actual_skip:
         existing_race = race_service.get_race_by_id(db, race_id)
         if existing_race and len(existing_race.entries) > 0:
             return {

@@ -8,6 +8,7 @@ class HorseScraper(BaseScraper):
     """Scraper for horse detail page"""
 
     BASE_URL = "https://db.netkeiba.com/horse"
+    HTML_SUBDIR = "horses"
 
     def scrape(self, horse_id: str) -> dict:
         """
@@ -20,7 +21,7 @@ class HorseScraper(BaseScraper):
             Horse info dictionary
         """
         url = f"{self.BASE_URL}/{horse_id}/"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=horse_id)
         soup = self.parse_html(html)
 
         horse_info = {"horse_id": horse_id}
@@ -55,7 +56,7 @@ class HorseScraper(BaseScraper):
             Course aptitude dictionary
         """
         url = f"{self.BASE_URL}/{horse_id}/"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=horse_id)
         soup = self.parse_html(html)
 
         return self._parse_course_aptitude(soup)
@@ -160,15 +161,15 @@ class HorseScraper(BaseScraper):
     def scrape_past_results(self, horse_id: str) -> list[dict]:
         """
         Scrape horse's past race results
-        
+
         Args:
             horse_id: Horse ID
-            
+
         Returns:
             List of past race results
         """
         url = f"{self.BASE_URL}/{horse_id}/"
-        html = self.fetch(url)
+        html = self.fetch(url, identifier=horse_id)
         soup = self.parse_html(html)
         
         results = []

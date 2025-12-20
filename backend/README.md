@@ -215,6 +215,53 @@ detail_scraper = RaceDetailScraper()
 race_detail = detail_scraper.scrape("202406050811")
 ```
 
+## データリセット
+
+スクレイピングで取得したデータをクリアして、最初からやり直したい場合に使用します。
+
+### コマンド
+
+```bash
+psql -U daikigon -d keiba_db -c "TRUNCATE entries, trainings, predictions, history, races, horses, jockeys CASCADE;"
+```
+
+### 解説
+
+| 項目 | 説明 |
+|------|------|
+| `psql` | PostgreSQLのコマンドラインツール |
+| `-U daikigon` | 接続するユーザー名（環境に合わせて変更） |
+| `-d keiba_db` | 接続するデータベース名 |
+| `-c "..."` | 実行するSQLコマンド |
+| `TRUNCATE` | テーブルの全データを高速削除（DELETEより速い） |
+| `CASCADE` | 外部キー制約のある関連データも一緒に削除 |
+
+### 削除されるテーブル
+
+| テーブル | 内容 |
+|---------|------|
+| `races` | レース情報 |
+| `entries` | 出走馬情報（馬番、オッズ、着順など） |
+| `horses` | 馬情報（血統、戦績など） |
+| `jockeys` | 騎手情報 |
+| `trainings` | 調教データ |
+| `predictions` | AI予測結果 |
+| `history` | 予想履歴・成績 |
+
+### 確認方法
+
+削除後、データが空になったか確認：
+
+```bash
+psql -U daikigon -d keiba_db -c "SELECT 'races' as table_name, COUNT(*) FROM races UNION ALL SELECT 'entries', COUNT(*) FROM entries UNION ALL SELECT 'horses', COUNT(*) FROM horses;"
+```
+
+### 注意
+
+- **この操作は取り消せません** - 実行前に本当にリセットして良いか確認してください
+- テーブル構造（スキーマ）は残ります。データのみ削除されます
+- リセット後は再度スクレイピングでデータを取得してください
+
 ## 注意事項
 
 - スクレイピングは1.5秒以上の間隔を空けて実行されます
