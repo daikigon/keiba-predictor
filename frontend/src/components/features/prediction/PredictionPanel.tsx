@@ -117,6 +117,14 @@ function PredictionRow({ horse, rank }: { horse: PredictionHorse; rank: number }
     3: 'bg-orange-100 text-orange-800',
   };
 
+  // 期待値の表示色を決定
+  const getEvColor = (ev: number) => {
+    if (ev >= 1.5) return 'text-green-600 font-bold';
+    if (ev >= 1.0) return 'text-green-500';
+    if (ev >= 0.8) return 'text-yellow-600';
+    return 'text-gray-400';
+  };
+
   return (
     <div className="flex items-center gap-3 p-2 rounded-lg bg-gray-50">
       <span
@@ -127,26 +135,63 @@ function PredictionRow({ horse, rank }: { horse: PredictionHorse; rank: number }
       >
         {rank}
       </span>
-      <span className="font-medium">
-        {horse.horse_number}番 {horse.horse_name || ''}
-      </span>
-      <span className="text-sm text-gray-500 ml-auto">
-        {(horse.probability * 100).toFixed(1)}%
-      </span>
+      <div className="flex-1 min-w-0">
+        <span className="font-medium">
+          {horse.horse_number}番 {horse.horse_name || ''}
+        </span>
+        {horse.odds && (
+          <span className="text-xs text-gray-400 ml-2">
+            ({horse.odds.toFixed(1)}倍)
+          </span>
+        )}
+      </div>
+      <div className="flex flex-col items-end gap-0.5">
+        <span className="text-sm text-gray-500">
+          {(horse.probability * 100).toFixed(1)}%
+        </span>
+        {horse.tansho_ev !== undefined && horse.tansho_ev > 0 && (
+          <span className={cn('text-xs', getEvColor(horse.tansho_ev))}>
+            EV: {horse.tansho_ev.toFixed(2)}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
 
 function BetRecommendation({ bet }: { bet: RecommendedBet }) {
+  // 期待値の表示色を決定
+  const getEvBadgeColor = (ev: number) => {
+    if (ev >= 1.5) return 'bg-green-100 text-green-800 border-green-300';
+    if (ev >= 1.2) return 'bg-emerald-50 text-emerald-700 border-emerald-200';
+    if (ev >= 1.0) return 'bg-yellow-50 text-yellow-700 border-yellow-200';
+    return 'bg-gray-50 text-gray-600 border-gray-200';
+  };
+
   return (
     <div className="flex items-center gap-3 p-2 rounded-lg border">
-      <span className="font-medium text-sm">{bet.bet_type}</span>
-      <span className="text-gray-600">{bet.detail}</span>
-      <Badge
-        className={cn('ml-auto', CONFIDENCE_COLORS[bet.confidence])}
-      >
-        {bet.confidence === 'high' ? '高' : bet.confidence === 'medium' ? '中' : '低'}
-      </Badge>
+      <div className="flex items-center gap-2">
+        <span className="font-medium text-sm whitespace-nowrap">{bet.bet_type}</span>
+        <span className="text-gray-600">{bet.detail}</span>
+        {bet.horse_name && (
+          <span className="text-xs text-gray-400">({bet.horse_name})</span>
+        )}
+      </div>
+      <div className="flex items-center gap-2 ml-auto">
+        {bet.expected_value !== undefined && bet.expected_value > 0 && (
+          <span className={cn(
+            'text-xs px-1.5 py-0.5 rounded border',
+            getEvBadgeColor(bet.expected_value)
+          )}>
+            EV {bet.expected_value.toFixed(2)}
+          </span>
+        )}
+        <Badge
+          className={cn(CONFIDENCE_COLORS[bet.confidence])}
+        >
+          {bet.confidence === 'high' ? '高' : bet.confidence === 'medium' ? '中' : '低'}
+        </Badge>
+      </div>
     </div>
   );
 }

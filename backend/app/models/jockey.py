@@ -22,6 +22,12 @@ class Jockey(Base):
     place_rate: Mapped[Optional[float]] = mapped_column(Float)
     show_rate: Mapped[Optional[float]] = mapped_column(Float)
 
+    # リーディングデータ
+    year_rank: Mapped[Optional[int]] = mapped_column(Integer)  # 年間リーディング順位
+    year_wins: Mapped[Optional[int]] = mapped_column(Integer)  # 年間勝利数
+    year_rides: Mapped[Optional[int]] = mapped_column(Integer)  # 年間騎乗数
+    year_earnings: Mapped[Optional[int]] = mapped_column(Integer)  # 年間獲得賞金（万円）
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )

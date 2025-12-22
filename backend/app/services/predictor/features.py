@@ -10,7 +10,7 @@ import pandas as pd
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Race, Entry, Horse, Jockey, Training
+from app.models import Race, Entry, Horse, Jockey, Training, Trainer, Sire
 
 
 # カテゴリ変数のマッピング
@@ -74,12 +74,26 @@ class FeatureExtractor:
         # === 騎手情報 ===
         features.update(self._get_jockey_features(entry))
 
+        # === 騎手リーディングデータ ===
+        features.update(self._get_jockey_leading_features(entry))
+
+        # === 調教師リーディングデータ ===
+        features.update(self._get_trainer_leading_features(entry))
+
+        # === 種牡馬リーディングデータ ===
+        features.update(self._get_sire_leading_features(entry, race.track_type, race.distance))
+
         # === 過去成績 ===
         features.update(self._get_past_performance_features(entry.horse_id, race.date))
 
         # === コース適性 ===
         features.update(self._get_course_aptitude_features(
             entry.horse_id, race.course, race.distance, race.track_type
+        ))
+
+        # === 条件別成績 ===
+        features.update(self._get_condition_specific_features(
+            entry.horse_id, race.condition, race.distance, race.track_type
         ))
 
         # === オッズ・人気 ===
@@ -140,6 +154,119 @@ class FeatureExtractor:
                 "jockey_win_rate": 0,
                 "jockey_place_rate": 0,
                 "jockey_show_rate": 0,
+            }
+
+    def _get_jockey_leading_features(self, entry: Entry) -> dict:
+        """騎手リーディングデータの特徴量"""
+        jockey = entry.jockey
+
+        if jockey:
+            # リーディング順位を正規化（1位=1.0, 100位=0.01, なし=0）
+            year_rank = jockey.year_rank
+            rank_score = 1.0 / year_rank if year_rank and year_rank > 0 else 0
+
+            return {
+                "jockey_year_rank": year_rank or 0,
+                "jockey_rank_score": rank_score,
+                "jockey_year_wins": jockey.year_wins or 0,
+                "jockey_year_rides": jockey.year_rides or 0,
+                "jockey_year_earnings": (jockey.year_earnings or 0) / 10000,  # 正規化
+            }
+        else:
+            return {
+                "jockey_year_rank": 0,
+                "jockey_rank_score": 0,
+                "jockey_year_wins": 0,
+                "jockey_year_rides": 0,
+                "jockey_year_earnings": 0,
+            }
+
+    def _get_trainer_leading_features(self, entry: Entry) -> dict:
+        """調教師リーディングデータの特徴量"""
+        horse = entry.horse
+        if not horse or not horse.trainer:
+            return {
+                "trainer_year_rank": 0,
+                "trainer_rank_score": 0,
+                "trainer_year_wins": 0,
+                "trainer_win_rate": 0,
+            }
+
+        # 調教師名から調教師データを検索
+        stmt = select(Trainer).where(Trainer.name == horse.trainer)
+        trainer = self.db.execute(stmt).scalar_one_or_none()
+
+        if trainer:
+            year_rank = trainer.year_rank
+            rank_score = 1.0 / year_rank if year_rank and year_rank > 0 else 0
+
+            return {
+                "trainer_year_rank": year_rank or 0,
+                "trainer_rank_score": rank_score,
+                "trainer_year_wins": trainer.year_wins or 0,
+                "trainer_win_rate": trainer.win_rate or 0,
+            }
+        else:
+            return {
+                "trainer_year_rank": 0,
+                "trainer_rank_score": 0,
+                "trainer_year_wins": 0,
+                "trainer_win_rate": 0,
+            }
+
+    def _get_sire_leading_features(self, entry: Entry, track_type: str, distance: int) -> dict:
+        """種牡馬リーディングデータの特徴量"""
+        horse = entry.horse
+        if not horse or not horse.father:
+            return {
+                "sire_year_rank": 0,
+                "sire_rank_score": 0,
+                "sire_year_wins": 0,
+                "sire_win_rate": 0,
+                "sire_track_win_rate": 0,
+                "sire_distance_win_rate": 0,
+            }
+
+        # 種牡馬名から種牡馬データを検索
+        stmt = select(Sire).where(Sire.name == horse.father)
+        sire = self.db.execute(stmt).scalar_one_or_none()
+
+        if sire:
+            year_rank = sire.year_rank
+            rank_score = 1.0 / year_rank if year_rank and year_rank > 0 else 0
+
+            # 馬場適性
+            if track_type == "芝":
+                track_win_rate = sire.turf_win_rate or 0
+            else:
+                track_win_rate = sire.dirt_win_rate or 0
+
+            # 距離適性
+            if distance <= 1400:
+                distance_win_rate = sire.short_win_rate or 0
+            elif distance <= 1800:
+                distance_win_rate = sire.mile_win_rate or 0
+            elif distance <= 2200:
+                distance_win_rate = sire.middle_win_rate or 0
+            else:
+                distance_win_rate = sire.long_win_rate or 0
+
+            return {
+                "sire_year_rank": year_rank or 0,
+                "sire_rank_score": rank_score,
+                "sire_year_wins": sire.year_wins or 0,
+                "sire_win_rate": sire.win_rate or 0,
+                "sire_track_win_rate": track_win_rate,
+                "sire_distance_win_rate": distance_win_rate,
+            }
+        else:
+            return {
+                "sire_year_rank": 0,
+                "sire_rank_score": 0,
+                "sire_year_wins": 0,
+                "sire_win_rate": 0,
+                "sire_track_win_rate": 0,
+                "sire_distance_win_rate": 0,
             }
 
     def _get_past_performance_features(
@@ -271,6 +398,85 @@ class FeatureExtractor:
             "track_runs": len(track_entries),
         }
 
+    def _get_condition_specific_features(
+        self, horse_id: str, condition: str, distance: int, track_type: str
+    ) -> dict:
+        """
+        条件別成績の特徴量
+
+        - 馬場状態別成績（良/稍重/重/不良）
+        - 距離カテゴリ別成績（短距離/マイル/中距離/長距離）
+        """
+        # 馬場状態別成績
+        stmt = (
+            select(Entry)
+            .join(Race)
+            .where(Entry.horse_id == horse_id)
+            .where(Race.condition == condition)
+            .where(Entry.result.isnot(None))
+        )
+        condition_entries = list(self.db.execute(stmt).scalars().all())
+
+        # 距離カテゴリ別成績
+        if distance <= 1400:
+            dist_min, dist_max = 0, 1400
+        elif distance <= 1800:
+            dist_min, dist_max = 1401, 1800
+        elif distance <= 2200:
+            dist_min, dist_max = 1801, 2200
+        else:
+            dist_min, dist_max = 2201, 9999
+
+        stmt = (
+            select(Entry)
+            .join(Race)
+            .where(Entry.horse_id == horse_id)
+            .where(Race.distance.between(dist_min, dist_max))
+            .where(Entry.result.isnot(None))
+        )
+        dist_cat_entries = list(self.db.execute(stmt).scalars().all())
+
+        # 馬場状態×馬場タイプの成績
+        stmt = (
+            select(Entry)
+            .join(Race)
+            .where(Entry.horse_id == horse_id)
+            .where(Race.condition == condition)
+            .where(Race.track_type == track_type)
+            .where(Entry.result.isnot(None))
+        )
+        cond_track_entries = list(self.db.execute(stmt).scalars().all())
+
+        def calc_stats(entries):
+            if not entries:
+                return 0, 0, 0, 0
+            total = len(entries)
+            wins = sum(1 for e in entries if e.result == 1)
+            places = sum(1 for e in entries if e.result <= 3)
+            avg_rank = np.mean([e.result for e in entries if e.result])
+            return wins / total, places / total, avg_rank, total
+
+        cond_win, cond_show, cond_avg, cond_runs = calc_stats(condition_entries)
+        dist_cat_win, dist_cat_show, dist_cat_avg, dist_cat_runs = calc_stats(dist_cat_entries)
+        cond_track_win, cond_track_show, cond_track_avg, cond_track_runs = calc_stats(cond_track_entries)
+
+        return {
+            # 馬場状態別
+            "condition_win_rate": cond_win,
+            "condition_show_rate": cond_show,
+            "condition_avg_rank": cond_avg,
+            "condition_runs": cond_runs,
+            # 距離カテゴリ別
+            "dist_category_win_rate": dist_cat_win,
+            "dist_category_show_rate": dist_cat_show,
+            "dist_category_avg_rank": dist_cat_avg,
+            "dist_category_runs": dist_cat_runs,
+            # 馬場状態×馬場タイプ
+            "cond_track_win_rate": cond_track_win,
+            "cond_track_show_rate": cond_track_show,
+            "cond_track_runs": cond_track_runs,
+        }
+
     def _get_odds_features(self, entry: Entry) -> dict:
         """オッズ・人気の特徴量"""
         odds = entry.odds or 0
@@ -329,8 +535,17 @@ def get_feature_columns() -> list[str]:
         "grade", "race_number", "field_size", "frame_number",
         # 馬の基本情報
         "horse_age", "horse_sex", "weight", "horse_weight", "weight_diff",
-        # 騎手
+        # 騎手基本
         "jockey_win_rate", "jockey_place_rate", "jockey_show_rate",
+        # 騎手リーディング
+        "jockey_year_rank", "jockey_rank_score", "jockey_year_wins",
+        "jockey_year_rides", "jockey_year_earnings",
+        # 調教師リーディング
+        "trainer_year_rank", "trainer_rank_score", "trainer_year_wins",
+        "trainer_win_rate",
+        # 種牡馬リーディング
+        "sire_year_rank", "sire_rank_score", "sire_year_wins",
+        "sire_win_rate", "sire_track_win_rate", "sire_distance_win_rate",
         # 過去成績
         "avg_rank_last3", "avg_rank_last5", "win_rate", "place_rate",
         "show_rate", "best_rank", "days_since_last", "last_result",
@@ -338,6 +553,10 @@ def get_feature_columns() -> list[str]:
         # コース適性
         "course_win_rate", "distance_win_rate", "track_win_rate",
         "course_runs", "distance_runs", "track_runs",
+        # 条件別成績
+        "condition_win_rate", "condition_show_rate", "condition_avg_rank", "condition_runs",
+        "dist_category_win_rate", "dist_category_show_rate", "dist_category_avg_rank", "dist_category_runs",
+        "cond_track_win_rate", "cond_track_show_rate", "cond_track_runs",
         # オッズ
         "odds", "log_odds", "popularity",
         # 調教
@@ -345,13 +564,18 @@ def get_feature_columns() -> list[str]:
     ]
 
 
-def prepare_training_data(db: Session, min_date: Optional[date] = None) -> tuple[pd.DataFrame, pd.Series]:
+def prepare_training_data(
+    db: Session,
+    min_date: Optional[date] = None,
+    max_date: Optional[date] = None,
+) -> tuple[pd.DataFrame, pd.Series]:
     """
     学習用データを準備する
 
     Args:
         db: データベースセッション
         min_date: 最小日付（これ以降のレースのみ使用）
+        max_date: 最大日付（これ以前のレースのみ使用）
 
     Returns:
         X: 特徴量DataFrame
@@ -363,6 +587,8 @@ def prepare_training_data(db: Session, min_date: Optional[date] = None) -> tuple
     stmt = select(Race).where(Race.entries.any(Entry.result.isnot(None)))
     if min_date:
         stmt = stmt.where(Race.date >= min_date)
+    if max_date:
+        stmt = stmt.where(Race.date <= max_date)
     stmt = stmt.order_by(Race.date)
 
     races = list(db.execute(stmt).scalars().all())
@@ -409,3 +635,76 @@ def prepare_training_data(db: Session, min_date: Optional[date] = None) -> tuple
     X = X.fillna(0)
 
     return X, y
+
+
+def prepare_time_split_data(
+    db: Session,
+    train_end_date: date,
+    valid_end_date: date,
+    train_start_date: Optional[date] = None,
+) -> dict:
+    """
+    時系列ベースで学習・検証・テストデータを準備する
+
+    データリークを防ぐため、時間で区切ってデータを分割する:
+    - 学習データ: train_start_date ~ train_end_date
+    - 検証データ: train_end_date ~ valid_end_date (early stopping用)
+    - テストデータ: valid_end_date ~ 現在 (精度評価用、学習には使わない)
+
+    Args:
+        db: データベースセッション
+        train_end_date: 学習データの終了日
+        valid_end_date: 検証データの終了日（テストデータの開始日）
+        train_start_date: 学習データの開始日（指定しない場合は全データ）
+
+    Returns:
+        dict: {
+            'train': (X_train, y_train),
+            'valid': (X_valid, y_valid),
+            'test': (X_test, y_test),
+            'date_ranges': {
+                'train': (start, end),
+                'valid': (start, end),
+                'test': (start, end),
+            }
+        }
+    """
+    from datetime import timedelta
+
+    # 学習データ
+    X_train, y_train = prepare_training_data(
+        db,
+        min_date=train_start_date,
+        max_date=train_end_date,
+    )
+
+    # 検証データ（train_end_dateの翌日から）
+    valid_start = train_end_date + timedelta(days=1)
+    X_valid, y_valid = prepare_training_data(
+        db,
+        min_date=valid_start,
+        max_date=valid_end_date,
+    )
+
+    # テストデータ（valid_end_dateの翌日から現在まで）
+    test_start = valid_end_date + timedelta(days=1)
+    X_test, y_test = prepare_training_data(
+        db,
+        min_date=test_start,
+    )
+
+    return {
+        'train': (X_train, y_train),
+        'valid': (X_valid, y_valid),
+        'test': (X_test, y_test),
+        'date_ranges': {
+            'train': (train_start_date, train_end_date),
+            'valid': (valid_start, valid_end_date),
+            'test': (test_start, None),
+        },
+        'counts': {
+            'train': len(y_train),
+            'valid': len(y_valid),
+            'test': len(y_test),
+        }
+    }

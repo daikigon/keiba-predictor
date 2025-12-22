@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.logging_config import get_logger
 from app.db.base import SessionLocal
-from app.services.predictor import prepare_training_data, HorseRacingPredictor
+from app.services.predictor import prepare_training_data, prepare_time_split_data, HorseRacingPredictor
 from app.services.predictor.model import MODEL_DIR
 
 logger = get_logger(__name__)
@@ -81,15 +81,22 @@ def start_retraining(
     num_boost_round: int = 1000,
     early_stopping: int = 50,
     valid_fraction: float = 0.2,
+    # 時系列分割モード用パラメータ
+    use_time_split: bool = False,
+    train_end_date: Optional[date] = None,
+    valid_end_date: Optional[date] = None,
 ) -> dict:
     """
     再学習を開始する
 
     Args:
-        min_date: 学習データの最小日付
+        min_date: 学習データの最小日付（従来モード）
         num_boost_round: ブースティング回数
         early_stopping: 早期停止回数
-        valid_fraction: 検証データの割合
+        valid_fraction: 検証データの割合（従来モード）
+        use_time_split: 時系列分割モードを使用するか
+        train_end_date: 学習データの終了日（時系列分割モード）
+        valid_end_date: 検証データの終了日（時系列分割モード）
 
     Returns:
         開始状態
@@ -108,7 +115,8 @@ def start_retraining(
     # バックグラウンドで再学習を実行
     thread = threading.Thread(
         target=_run_retraining,
-        args=(min_date, num_boost_round, early_stopping, valid_fraction),
+        args=(min_date, num_boost_round, early_stopping, valid_fraction,
+              use_time_split, train_end_date, valid_end_date),
         daemon=True,
     )
     thread.start()
@@ -124,6 +132,9 @@ def _run_retraining(
     num_boost_round: int,
     early_stopping: int,
     valid_fraction: float,
+    use_time_split: bool = False,
+    train_end_date: Optional[date] = None,
+    valid_end_date: Optional[date] = None,
 ) -> None:
     """バックグラウンドで再学習を実行"""
     result = RetrainingResult()
@@ -141,31 +152,67 @@ def _run_retraining(
         version = datetime.now().strftime("v%Y%m%d_%H%M%S")
         result.model_version = version
 
-        # 学習データの準備
-        logger.info("Preparing training data...")
-        X, y = prepare_training_data(db, min_date=min_date)
-
-        if X.empty:
-            raise ValueError("No training data found")
-
-        result.num_samples = len(X)
-        result.num_features = len(X.columns)
-        logger.info(f"Training data: {result.num_samples} samples, {result.num_features} features")
-
-        with _lock:
-            _retraining_status["progress"] = "training"
-
-        # モデル学習
-        logger.info("Training model...")
         predictor = HorseRacingPredictor(model_version=version)
 
-        train_result = predictor.train(
-            X,
-            y,
-            num_boost_round=num_boost_round,
-            early_stopping_rounds=early_stopping,
-            valid_fraction=valid_fraction,
-        )
+        if use_time_split and train_end_date and valid_end_date:
+            # 時系列分割モード
+            logger.info(f"Using time-split mode: train_end={train_end_date}, valid_end={valid_end_date}")
+            data = prepare_time_split_data(
+                db,
+                train_end_date=train_end_date,
+                valid_end_date=valid_end_date,
+                train_start_date=min_date,
+            )
+
+            X_train, y_train = data['train']
+            X_valid, y_valid = data['valid']
+
+            if X_train.empty:
+                raise ValueError("No training data found")
+            if X_valid.empty:
+                raise ValueError("No validation data found")
+
+            result.num_samples = len(X_train) + len(X_valid)
+            result.num_features = len(X_train.columns)
+            logger.info(f"Train: {len(X_train)} samples, Valid: {len(X_valid)} samples, Test: {data['counts']['test']} samples")
+
+            with _lock:
+                _retraining_status["progress"] = "training"
+
+            # 時系列分割モードで学習
+            logger.info("Training model with time-split data...")
+            train_result = predictor.train_with_validation(
+                X_train,
+                y_train,
+                X_valid,
+                y_valid,
+                num_boost_round=num_boost_round,
+                early_stopping_rounds=early_stopping,
+            )
+        else:
+            # 従来モード
+            logger.info("Using legacy mode (fraction-based split)")
+            X, y = prepare_training_data(db, min_date=min_date)
+
+            if X.empty:
+                raise ValueError("No training data found")
+
+            result.num_samples = len(X)
+            result.num_features = len(X.columns)
+            logger.info(f"Training data: {result.num_samples} samples, {result.num_features} features")
+
+            with _lock:
+                _retraining_status["progress"] = "training"
+
+            # 従来モードで学習
+            logger.info("Training model...")
+            train_result = predictor.train(
+                X,
+                y,
+                num_boost_round=num_boost_round,
+                early_stopping_rounds=early_stopping,
+                valid_fraction=valid_fraction,
+            )
 
         result.train_rmse = train_result["train_rmse"]
         result.valid_rmse = train_result["valid_rmse"]

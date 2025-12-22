@@ -1,8 +1,10 @@
 from datetime import datetime
 from functools import lru_cache
+from itertools import combinations
 from typing import Optional
 import time
 
+import numpy as np
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,10 @@ from app.services.predictor import FeatureExtractor, get_model
 logger = get_logger(__name__)
 
 MODEL_VERSION = "v1"
+
+# 期待値ベース推奨のデフォルト閾値
+DEFAULT_EV_THRESHOLD = 1.0  # 期待値が1.0以上で推奨
+DEFAULT_UMAREN_EV_THRESHOLD = 1.2  # 馬連は少し高めの閾値
 
 # グローバルモデルインスタンス（起動時に一度だけ読み込み）
 _predictor = None
@@ -153,10 +159,8 @@ def _generate_ml_predictions(db: Session, race: Race, predictor) -> list[dict]:
         scores = predictor.predict(df)
         df["pred_score"] = scores
 
-        # スコアをソフトマックスで確率に変換
-        import numpy as np
-        exp_scores = np.exp(scores - np.max(scores))  # オーバーフロー防止
-        probabilities = exp_scores / exp_scores.sum()
+        # キャリブレーション済み確率を取得（または従来のソフトマックス）
+        probabilities = predictor.predict_proba(df)
         df["probability"] = probabilities
 
         # ランキングを計算（スコアが高いほど上位）
@@ -169,6 +173,13 @@ def _generate_ml_predictions(db: Session, race: Race, predictor) -> list[dict]:
                 (e for e in race.entries if e.horse_number == row["horse_number"]),
                 None
             )
+            odds = entry.odds if entry else None
+
+            # 単勝期待値を計算: 期待値 = 予測勝率 × オッズ
+            tansho_ev = 0.0
+            if odds and odds > 0:
+                tansho_ev = float(row["probability"]) * odds
+
             predictions.append({
                 "horse_number": int(row["horse_number"]),
                 "horse_id": row["horse_id"],
@@ -176,8 +187,9 @@ def _generate_ml_predictions(db: Session, race: Race, predictor) -> list[dict]:
                 "predicted_rank": int(row["predicted_rank"]),
                 "probability": round(float(row["probability"]), 4),
                 "score": round(float(row["pred_score"]), 4),
-                "odds": entry.odds if entry else None,
+                "odds": odds,
                 "popularity": entry.popularity if entry else None,
+                "tansho_ev": round(tansho_ev, 3),  # 単勝期待値
             })
 
         # 予測順位でソート
@@ -219,6 +231,7 @@ def _generate_baseline_predictions(entries) -> list[dict]:
             "probability": round(prob, 4),
             "odds": entry.odds,
             "popularity": entry.popularity,
+            "tansho_ev": 0.0,  # ベースラインでは期待値未計算
         })
 
     # Normalize probabilities
@@ -226,41 +239,155 @@ def _generate_baseline_predictions(entries) -> list[dict]:
     if total_prob > 0:
         for p in predictions:
             p["probability"] = round(p["probability"] / total_prob, 4)
+            # 正規化後の確率で期待値を再計算
+            if p["odds"] and p["odds"] > 0:
+                p["tansho_ev"] = round(p["probability"] * p["odds"], 3)
 
     # Sort by predicted rank for output
     predictions.sort(key=lambda x: x["predicted_rank"])
     return predictions
 
 
-def _generate_recommended_bets(predictions: list[dict]) -> list[dict]:
-    """Generate recommended bets based on predictions"""
-    if len(predictions) < 3:
+def _calculate_umaren_probability(predictions: list[dict], horse1_num: int, horse2_num: int) -> float:
+    """
+    馬連の的中確率を計算
+
+    2頭が1着・2着に入る確率（順不同）
+    P(A,B) = P(A勝ち)×P(B|A勝ち) + P(B勝ち)×P(A|B勝ち)
+
+    簡易計算: P(A) × P(B) × 補正係数
+    """
+    horse1 = next((p for p in predictions if p["horse_number"] == horse1_num), None)
+    horse2 = next((p for p in predictions if p["horse_number"] == horse2_num), None)
+
+    if not horse1 or not horse2:
+        return 0.0
+
+    p1 = horse1["probability"]
+    p2 = horse2["probability"]
+
+    # 上位2頭が入る確率を計算
+    # 簡易モデル: 勝率を使った近似
+    # 実際は条件付き確率を使うべきだが、ここでは積に補正係数をかける
+    n_horses = len(predictions)
+    correction = n_horses / 2 if n_horses > 2 else 1
+
+    # 順不同なので両方のケースを考慮
+    umaren_prob = (p1 * p2 * correction) * 2
+
+    return min(umaren_prob, 1.0)  # 1を超えないように
+
+
+def _generate_recommended_bets(
+    predictions: list[dict],
+    umaren_odds: dict = None,
+    ev_threshold: float = DEFAULT_EV_THRESHOLD,
+    umaren_ev_threshold: float = DEFAULT_UMAREN_EV_THRESHOLD,
+) -> list[dict]:
+    """
+    期待値ベースで推奨買い目を生成
+
+    Args:
+        predictions: 馬ごとの予測結果
+        umaren_odds: 馬連オッズ辞書 {(馬番1, 馬番2): オッズ}
+        ev_threshold: 単勝の期待値閾値
+        umaren_ev_threshold: 馬連の期待値閾値
+
+    Returns:
+        推奨買い目リスト
+    """
+    if len(predictions) < 2:
         return []
 
-    top3 = predictions[:3]
+    bets = []
 
-    bets = [
-        {
-            "bet_type": "単勝",
-            "detail": str(top3[0]["horse_number"]),
-            "confidence": "high" if top3[0]["probability"] > 0.3 else "medium",
-        },
-        {
+    # === 単勝の期待値ベース推奨 ===
+    tansho_candidates = []
+    for pred in predictions:
+        ev = pred.get("tansho_ev", 0)
+        if ev >= ev_threshold:
+            confidence = "high" if ev >= 1.5 else "medium"
+            tansho_candidates.append({
+                "bet_type": "単勝",
+                "detail": str(pred["horse_number"]),
+                "horse_name": pred.get("horse_name"),
+                "confidence": confidence,
+                "expected_value": round(ev, 3),
+                "probability": pred["probability"],
+                "odds": pred["odds"],
+            })
+
+    # 期待値が高い順にソート
+    tansho_candidates.sort(key=lambda x: x["expected_value"], reverse=True)
+    bets.extend(tansho_candidates[:3])  # 上位3件まで
+
+    # === 馬連の期待値ベース推奨 ===
+    umaren_candidates = []
+
+    # 上位5頭の組み合わせを検討
+    top_horses = sorted(predictions, key=lambda x: x["predicted_rank"])[:5]
+
+    for h1, h2 in combinations(top_horses, 2):
+        num1, num2 = h1["horse_number"], h2["horse_number"]
+
+        # 馬連確率を計算
+        umaren_prob = _calculate_umaren_probability(predictions, num1, num2)
+
+        # 馬連オッズが提供されていれば使用、なければ推定
+        if umaren_odds and (num1, num2) in umaren_odds:
+            odds = umaren_odds[(num1, num2)]
+        elif umaren_odds and (num2, num1) in umaren_odds:
+            odds = umaren_odds[(num2, num1)]
+        else:
+            # オッズがない場合は単勝オッズから推定
+            # 馬連オッズ ≈ (単勝1 × 単勝2) / 補正係数
+            o1 = h1.get("odds", 10) or 10
+            o2 = h2.get("odds", 10) or 10
+            odds = (o1 * o2) / 3  # 経験的補正
+
+        # 期待値を計算
+        umaren_ev = umaren_prob * odds
+
+        if umaren_ev >= umaren_ev_threshold:
+            confidence = "high" if umaren_ev >= 1.8 else "medium"
+            umaren_candidates.append({
+                "bet_type": "馬連",
+                "detail": f"{min(num1, num2)}-{max(num1, num2)}",
+                "horse_names": [h1.get("horse_name"), h2.get("horse_name")],
+                "confidence": confidence,
+                "expected_value": round(umaren_ev, 3),
+                "probability": round(umaren_prob, 4),
+                "odds": round(odds, 1) if odds else None,
+            })
+
+    # 期待値が高い順にソート
+    umaren_candidates.sort(key=lambda x: x["expected_value"], reverse=True)
+    bets.extend(umaren_candidates[:5])  # 上位5件まで
+
+    # === 期待値が低くても上位馬のベーシック推奨 ===
+    if len(predictions) >= 3:
+        top3 = predictions[:3]
+
+        # 既に単勝推奨がない場合、1番人気を追加
+        has_tansho = any(b["bet_type"] == "単勝" for b in bets)
+        if not has_tansho:
+            bets.append({
+                "bet_type": "単勝",
+                "detail": str(top3[0]["horse_number"]),
+                "horse_name": top3[0].get("horse_name"),
+                "confidence": "low",
+                "expected_value": top3[0].get("tansho_ev", 0),
+                "probability": top3[0]["probability"],
+                "odds": top3[0]["odds"],
+            })
+
+        # 複勝（参考として追加）
+        bets.append({
             "bet_type": "複勝",
             "detail": str(top3[0]["horse_number"]),
+            "horse_name": top3[0].get("horse_name"),
             "confidence": "high",
-        },
-        {
-            "bet_type": "馬連",
-            "detail": f"{top3[0]['horse_number']}-{top3[1]['horse_number']}",
-            "confidence": "medium",
-        },
-        {
-            "bet_type": "三連複",
-            "detail": f"{top3[0]['horse_number']}-{top3[1]['horse_number']}-{top3[2]['horse_number']}",
-            "confidence": "low",
-        },
-    ]
+        })
 
     return bets
 

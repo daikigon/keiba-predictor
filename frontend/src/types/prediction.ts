@@ -7,12 +7,18 @@ export interface PredictionHorse {
   score?: number;
   odds?: number;
   popularity?: number;
+  tansho_ev?: number;  // 単勝期待値
 }
 
 export interface RecommendedBet {
   bet_type: string;
   detail: string;
   confidence: 'high' | 'medium' | 'low';
+  horse_name?: string;
+  horse_names?: string[];  // 馬連用
+  expected_value?: number;  // 期待値
+  probability?: number;
+  odds?: number;
 }
 
 export interface PredictionResult {

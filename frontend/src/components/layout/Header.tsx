@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
-import { Calendar, History, BarChart3, Database, Users, Award } from 'lucide-react';
+import { Calendar, History, BarChart3, Database, Users, Award, Cpu } from 'lucide-react';
 
 const navigation = [
   { name: 'ダッシュボード', href: '/', icon: BarChart3 },
@@ -12,6 +12,7 @@ const navigation = [
   { name: '騎手', href: '/jockeys', icon: Users },
   { name: '予想履歴', href: '/history', icon: History },
   { name: 'データ管理', href: '/data', icon: Database },
+  { name: 'モデル', href: '/model', icon: Cpu },
 ];
 
 export function Header() {

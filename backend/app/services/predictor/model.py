@@ -2,6 +2,7 @@
 予測モデルモジュール
 
 LightGBMを使用した競馬予測モデル
+キャリブレーション機能付き
 """
 import os
 import pickle
@@ -12,6 +13,8 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 from sklearn.preprocessing import StandardScaler
+from sklearn.isotonic import IsotonicRegression
+from sklearn.calibration import CalibratedClassifierCV
 
 from .features import get_feature_columns
 
@@ -21,13 +24,15 @@ MODEL_DIR = Path(__file__).parent.parent.parent.parent / "ml" / "models"
 
 
 class HorseRacingPredictor:
-    """競馬予測モデル"""
+    """競馬予測モデル（キャリブレーション機能付き）"""
 
     def __init__(self, model_version: str = "v1"):
         self.model_version = model_version
         self.model: Optional[lgb.Booster] = None
         self.scaler: Optional[StandardScaler] = None
+        self.calibrator: Optional[IsotonicRegression] = None
         self.feature_columns = get_feature_columns()
+        self.use_calibration = True  # キャリブレーション使用フラグ
 
     def train(
         self,
@@ -117,6 +122,10 @@ class HorseRacingPredictor:
         train_pred = self.model.predict(X_train)
         valid_pred = self.model.predict(X_valid)
 
+        # === キャリブレーションの学習 ===
+        # 検証データを使ってキャリブレーターを学習
+        self._train_calibrator(X_valid, y_valid, valid_pred)
+
         results = {
             "train_rmse": np.sqrt(np.mean((train_pred - y_train_rank) ** 2)),
             "valid_rmse": np.sqrt(np.mean((valid_pred - y_valid_rank) ** 2)),
@@ -124,9 +133,146 @@ class HorseRacingPredictor:
             "num_features": len(self.feature_columns),
             "num_train_samples": len(X_train),
             "num_valid_samples": len(X_valid),
+            "calibrator_trained": self.calibrator is not None,
         }
 
         return results
+
+    def train_with_validation(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_valid: pd.DataFrame,
+        y_valid: pd.Series,
+        params: Optional[dict] = None,
+        num_boost_round: int = 1000,
+        early_stopping_rounds: int = 50,
+    ) -> dict:
+        """
+        事前に分割されたデータでモデルを学習する（時系列分割用）
+
+        Args:
+            X_train: 学習用特徴量DataFrame
+            y_train: 学習用ターゲット（着順）
+            X_valid: 検証用特徴量DataFrame
+            y_valid: 検証用ターゲット（着順）
+            params: LightGBMパラメータ
+            num_boost_round: ブースティング回数
+            early_stopping_rounds: 早期停止回数
+
+        Returns:
+            学習結果（メトリクス等）
+        """
+        # デフォルトパラメータ
+        if params is None:
+            params = {
+                "objective": "regression",
+                "metric": "rmse",
+                "boosting_type": "gbdt",
+                "num_leaves": 31,
+                "learning_rate": 0.05,
+                "feature_fraction": 0.8,
+                "bagging_fraction": 0.8,
+                "bagging_freq": 5,
+                "verbose": -1,
+                "seed": 42,
+            }
+
+        # スケーリング（学習データでfitし、検証データにはtransformのみ）
+        self.scaler = StandardScaler()
+        X_train_scaled = pd.DataFrame(
+            self.scaler.fit_transform(X_train),
+            columns=X_train.columns,
+            index=X_train.index,
+        )
+        X_valid_scaled = pd.DataFrame(
+            self.scaler.transform(X_valid),
+            columns=X_valid.columns,
+            index=X_valid.index,
+        )
+
+        # ランキング学習用: 着順を反転（1位が最高スコア）
+        y_train_rank = y_train.max() - y_train + 1
+        y_valid_rank = y_valid.max() - y_valid + 1
+
+        # LightGBMデータセット作成
+        train_data = lgb.Dataset(X_train_scaled, label=y_train_rank)
+        valid_data = lgb.Dataset(X_valid_scaled, label=y_valid_rank, reference=train_data)
+
+        # 学習
+        callbacks = [
+            lgb.early_stopping(stopping_rounds=early_stopping_rounds),
+            lgb.log_evaluation(period=100),
+        ]
+
+        self.model = lgb.train(
+            params,
+            train_data,
+            num_boost_round=num_boost_round,
+            valid_sets=[train_data, valid_data],
+            valid_names=["train", "valid"],
+            callbacks=callbacks,
+        )
+
+        # 評価
+        train_pred = self.model.predict(X_train_scaled)
+        valid_pred = self.model.predict(X_valid_scaled)
+
+        # キャリブレーションの学習
+        self._train_calibrator(X_valid_scaled, y_valid, valid_pred)
+
+        results = {
+            "train_rmse": np.sqrt(np.mean((train_pred - y_train_rank) ** 2)),
+            "valid_rmse": np.sqrt(np.mean((valid_pred - y_valid_rank) ** 2)),
+            "best_iteration": self.model.best_iteration,
+            "num_features": len(self.feature_columns),
+            "num_train_samples": len(X_train),
+            "num_valid_samples": len(X_valid),
+            "calibrator_trained": self.calibrator is not None,
+        }
+
+        return results
+
+    def _train_calibrator(
+        self,
+        X_valid: pd.DataFrame,
+        y_valid: pd.Series,
+        valid_pred: np.ndarray,
+    ) -> None:
+        """
+        キャリブレーターを学習する
+
+        検証データでの予測値と実際の勝敗を使って、
+        確率を補正するためのキャリブレーターを学習
+
+        Args:
+            X_valid: 検証用特徴量
+            y_valid: 検証用ターゲット（着順）
+            valid_pred: モデルの予測スコア
+        """
+        try:
+            # 着順1位を正解ラベルとする（二値分類）
+            y_binary = (y_valid == 1).astype(int)
+
+            # 予測スコアを0-1に正規化
+            pred_min = valid_pred.min()
+            pred_max = valid_pred.max()
+            if pred_max > pred_min:
+                pred_normalized = (valid_pred - pred_min) / (pred_max - pred_min)
+            else:
+                pred_normalized = np.full_like(valid_pred, 0.5)
+
+            # Isotonic Regressionでキャリブレーション
+            self.calibrator = IsotonicRegression(
+                y_min=0.0,
+                y_max=1.0,
+                out_of_bounds='clip'
+            )
+            self.calibrator.fit(pred_normalized, y_binary)
+
+        except Exception as e:
+            print(f"Calibrator training failed: {e}")
+            self.calibrator = None
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """
@@ -158,6 +304,41 @@ class HorseRacingPredictor:
         )
 
         return self.model.predict(X_scaled)
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """
+        キャリブレーション済み確率を予測
+
+        Args:
+            X: 特徴量DataFrame
+
+        Returns:
+            キャリブレーション済み勝率（0-1）
+        """
+        scores = self.predict(X)
+
+        if self.calibrator is not None and self.use_calibration:
+            # スコアを0-1に正規化
+            pred_min = scores.min()
+            pred_max = scores.max()
+            if pred_max > pred_min:
+                scores_normalized = (scores - pred_min) / (pred_max - pred_min)
+            else:
+                scores_normalized = np.full_like(scores, 0.5)
+
+            # キャリブレーション適用
+            calibrated_probs = self.calibrator.predict(scores_normalized)
+
+            # 確率の正規化（合計が1になるように）
+            total = calibrated_probs.sum()
+            if total > 0:
+                calibrated_probs = calibrated_probs / total
+
+            return calibrated_probs
+        else:
+            # キャリブレーターがない場合はソフトマックス
+            exp_scores = np.exp(scores - np.max(scores))
+            return exp_scores / exp_scores.sum()
 
     def predict_ranking(self, X: pd.DataFrame) -> list[int]:
         """
@@ -196,6 +377,7 @@ class HorseRacingPredictor:
         model_data = {
             "model": self.model,
             "scaler": self.scaler,
+            "calibrator": self.calibrator,
             "feature_columns": self.feature_columns,
             "model_version": self.model_version,
         }
@@ -223,6 +405,7 @@ class HorseRacingPredictor:
 
         self.model = model_data["model"]
         self.scaler = model_data["scaler"]
+        self.calibrator = model_data.get("calibrator")  # 後方互換性
         self.feature_columns = model_data["feature_columns"]
         self.model_version = model_data["model_version"]
 

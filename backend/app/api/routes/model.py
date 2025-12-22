@@ -1,49 +1,106 @@
 """
 モデル管理API
 
-再学習・モデル切り替え・バージョン管理エンドポイント
+再学習・モデル切り替え・バージョン管理・シミュレーションエンドポイント
 """
 from datetime import datetime
+from itertools import combinations
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import numpy as np
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.logging_config import get_logger
+from app.models import Race, Entry
 from app.services import retraining_service, prediction_service
+from app.services.predictor import FeatureExtractor, get_model
 
 logger = get_logger(__name__)
 router = APIRouter()
 
+# シミュレーション状態管理
+_simulation_status = {
+    "is_running": False,
+    "progress": 0,
+    "total": 0,
+    "results": None,
+    "error": None,
+}
+
+
+class RetrainParams(BaseModel):
+    """再学習パラメータ"""
+    num_boost_round: int = 1000
+    early_stopping: int = 50
+    # 従来モード用
+    min_date: Optional[str] = None
+    valid_fraction: float = 0.2
+    # 時系列分割モード用
+    use_time_split: bool = False
+    train_end_date: Optional[str] = None
+    valid_end_date: Optional[str] = None
+
 
 @router.post("/retrain")
-async def retrain_model(
-    min_date: Optional[str] = Query(None, description="Minimum date for training data (YYYY-MM-DD)"),
-    num_boost_round: int = Query(1000, description="Number of boosting rounds"),
-    early_stopping: int = Query(50, description="Early stopping rounds"),
-    valid_fraction: float = Query(0.2, description="Validation data fraction"),
-):
+async def retrain_model(params: RetrainParams):
     """
     モデルの再学習を開始
 
     バックグラウンドで再学習を実行します。
     進捗は GET /api/v1/model/status で確認できます。
-    """
-    parsed_date = None
-    if min_date:
-        try:
-            parsed_date = datetime.strptime(min_date, "%Y-%m-%d").date()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
-    logger.info(f"Starting retraining: min_date={min_date}, boost_round={num_boost_round}")
+    ## モード
+
+    ### 従来モード（デフォルト）
+    - `min_date`: 学習データの開始日
+    - `valid_fraction`: 検証データの割合（末尾からの割合）
+
+    ### 時系列分割モード（推奨）
+    - `use_time_split`: true に設定
+    - `train_end_date`: 学習データの終了日
+    - `valid_end_date`: 検証データの終了日（これ以降がテストデータ）
+    """
+
+    def parse_date(date_str: Optional[str]) -> Optional[datetime]:
+        if not date_str:
+            return None
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {date_str}. Use YYYY-MM-DD")
+
+    parsed_min_date = parse_date(params.min_date)
+    parsed_train_end = parse_date(params.train_end_date)
+    parsed_valid_end = parse_date(params.valid_end_date)
+
+    # 時系列分割モードのバリデーション
+    if params.use_time_split:
+        if not parsed_train_end or not parsed_valid_end:
+            raise HTTPException(
+                status_code=400,
+                detail="Time-split mode requires train_end_date and valid_end_date"
+            )
+        if parsed_train_end >= parsed_valid_end:
+            raise HTTPException(
+                status_code=400,
+                detail="train_end_date must be before valid_end_date"
+            )
+
+    logger.info(f"Starting retraining: use_time_split={params.use_time_split}, "
+                f"train_end={params.train_end_date}, valid_end={params.valid_end_date}")
 
     result = retraining_service.start_retraining(
-        min_date=parsed_date,
-        num_boost_round=num_boost_round,
-        early_stopping=early_stopping,
-        valid_fraction=valid_fraction,
+        min_date=parsed_min_date,
+        num_boost_round=params.num_boost_round,
+        early_stopping=params.early_stopping,
+        valid_fraction=params.valid_fraction,
+        use_time_split=params.use_time_split,
+        train_end_date=parsed_train_end,
+        valid_end_date=parsed_valid_end,
     )
 
     if result["status"] == "already_running":
@@ -201,3 +258,287 @@ async def get_feature_importance(
             status_code=500,
             detail=str(e)
         )
+
+
+# ================== シミュレーション関連 ==================
+
+class SimulationParams(BaseModel):
+    """シミュレーションパラメータ"""
+    ev_threshold: float = 1.0
+    umaren_ev_threshold: float = 1.2
+    bet_type: str = "all"  # "tansho", "umaren", or "all"
+    bet_amount: int = 100
+    limit: int = 200
+    # 期間指定（テストデータのみでシミュレーションする場合）
+    start_date: Optional[str] = None  # YYYY-MM-DD形式
+    end_date: Optional[str] = None  # YYYY-MM-DD形式
+
+
+def _calculate_umaren_prob(probabilities: dict, h1: int, h2: int, n_horses: int) -> float:
+    """馬連の的中確率を計算"""
+    p1 = probabilities.get(h1, 0)
+    p2 = probabilities.get(h2, 0)
+    if p1 == 0 or p2 == 0:
+        return 0.0
+    correction = n_horses / 2 if n_horses > 2 else 1
+    return min((p1 * p2 * correction) * 2, 1.0)
+
+
+def _run_simulation(
+    db: Session,
+    params: SimulationParams,
+):
+    """バックグラウンドでシミュレーションを実行"""
+    global _simulation_status
+
+    try:
+        _simulation_status["is_running"] = True
+        _simulation_status["progress"] = 0
+        _simulation_status["error"] = None
+
+        predictor = get_model("v1")
+        if predictor.model is None:
+            _simulation_status["error"] = "モデルが読み込まれていません"
+            _simulation_status["is_running"] = False
+            return
+
+        # レース取得（期間フィルタ適用）
+        stmt = (
+            select(Race)
+            .where(Race.entries.any(Entry.result.isnot(None)))
+        )
+
+        # 期間フィルタ
+        if params.start_date:
+            try:
+                start = datetime.strptime(params.start_date, "%Y-%m-%d").date()
+                stmt = stmt.where(Race.date >= start)
+            except ValueError:
+                pass
+
+        if params.end_date:
+            try:
+                end = datetime.strptime(params.end_date, "%Y-%m-%d").date()
+                stmt = stmt.where(Race.date <= end)
+            except ValueError:
+                pass
+
+        stmt = stmt.order_by(Race.date.desc()).limit(params.limit)
+        races = list(db.execute(stmt).scalars().all())
+        _simulation_status["total"] = len(races)
+
+        extractor = FeatureExtractor(db)
+        all_results = []
+        total_bet = 0
+        total_payout = 0
+        tansho_bets = []
+        umaren_bets = []
+
+        for i, race in enumerate(races):
+            _simulation_status["progress"] = i + 1
+
+            # 特徴量抽出
+            df = extractor.extract_race_features(race)
+            if df.empty:
+                continue
+
+            # 実際の着順とオッズを取得
+            actual_results = {}
+            odds_data = {}
+            for entry in race.entries:
+                if entry.result:
+                    actual_results[entry.horse_number] = entry.result
+                if entry.odds:
+                    odds_data[entry.horse_number] = entry.odds
+
+            if not actual_results or not odds_data:
+                continue
+
+            # 予測
+            try:
+                scores = predictor.predict(df)
+            except RuntimeError:
+                continue
+
+            # 確率計算
+            exp_scores = np.exp(scores - np.max(scores))
+            probabilities_arr = exp_scores / exp_scores.sum()
+            df["probability"] = probabilities_arr
+            df["pred_rank"] = (-scores).argsort().argsort() + 1
+
+            probabilities = dict(zip(df["horse_number"].astype(int), df["probability"]))
+
+            # 単勝シミュレーション
+            if params.bet_type in ("tansho", "all"):
+                for _, row in df.iterrows():
+                    horse_num = int(row["horse_number"])
+                    prob = row["probability"]
+                    odds = odds_data.get(horse_num, 0)
+
+                    if odds <= 0:
+                        continue
+
+                    ev = prob * odds
+                    if ev >= params.ev_threshold:
+                        actual_rank = actual_results.get(horse_num, 999)
+                        is_hit = actual_rank == 1
+                        payout = int(odds * params.bet_amount) if is_hit else 0
+
+                        tansho_bets.append({
+                            "horse_number": horse_num,
+                            "ev": round(ev, 3),
+                            "odds": odds,
+                            "is_hit": is_hit,
+                            "payout": payout,
+                        })
+                        total_bet += params.bet_amount
+                        total_payout += payout
+
+            # 馬連シミュレーション
+            if params.bet_type in ("umaren", "all"):
+                top5 = df.nsmallest(5, "pred_rank")
+
+                for (_, h1), (_, h2) in combinations(top5.iterrows(), 2):
+                    num1, num2 = int(h1["horse_number"]), int(h2["horse_number"])
+
+                    umaren_prob = _calculate_umaren_prob(probabilities, num1, num2, len(df))
+
+                    o1 = odds_data.get(num1, 10)
+                    o2 = odds_data.get(num2, 10)
+                    estimated_odds = (o1 * o2) / 3
+
+                    ev = umaren_prob * estimated_odds
+
+                    if ev >= params.umaren_ev_threshold:
+                        r1 = actual_results.get(num1, 999)
+                        r2 = actual_results.get(num2, 999)
+                        is_hit = (r1 <= 2 and r2 <= 2)
+                        payout = int(estimated_odds * params.bet_amount) if is_hit else 0
+
+                        umaren_bets.append({
+                            "combination": f"{min(num1,num2)}-{max(num1,num2)}",
+                            "ev": round(ev, 3),
+                            "odds": round(estimated_odds, 1),
+                            "is_hit": is_hit,
+                            "payout": payout,
+                        })
+                        total_bet += params.bet_amount
+                        total_payout += payout
+
+        # 結果集計
+        total_bets_count = len(tansho_bets) + len(umaren_bets)
+        total_hits = sum(1 for b in tansho_bets if b["is_hit"]) + sum(1 for b in umaren_bets if b["is_hit"])
+        roi = ((total_payout / total_bet) - 1) * 100 if total_bet > 0 else 0
+        hit_rate = (total_hits / total_bets_count) * 100 if total_bets_count > 0 else 0
+
+        _simulation_status["results"] = {
+            "total_races": len(races),
+            "total_bets": total_bets_count,
+            "total_hits": total_hits,
+            "hit_rate": round(hit_rate, 1),
+            "total_bet_amount": total_bet,
+            "total_payout": total_payout,
+            "profit": total_payout - total_bet,
+            "return_rate": round(100 * total_payout / total_bet, 1) if total_bet > 0 else 0,
+            "roi": round(roi, 1),
+            "tansho": {
+                "count": len(tansho_bets),
+                "hits": sum(1 for b in tansho_bets if b["is_hit"]),
+                "hit_rate": round(100 * sum(1 for b in tansho_bets if b["is_hit"]) / len(tansho_bets), 1) if tansho_bets else 0,
+                "bet_amount": len(tansho_bets) * params.bet_amount,
+                "payout": sum(b["payout"] for b in tansho_bets),
+                "return_rate": round(100 * sum(b["payout"] for b in tansho_bets) / (len(tansho_bets) * params.bet_amount), 1) if tansho_bets else 0,
+            },
+            "umaren": {
+                "count": len(umaren_bets),
+                "hits": sum(1 for b in umaren_bets if b["is_hit"]),
+                "hit_rate": round(100 * sum(1 for b in umaren_bets if b["is_hit"]) / len(umaren_bets), 1) if umaren_bets else 0,
+                "bet_amount": len(umaren_bets) * params.bet_amount,
+                "payout": sum(b["payout"] for b in umaren_bets),
+                "return_rate": round(100 * sum(b["payout"] for b in umaren_bets) / (len(umaren_bets) * params.bet_amount), 1) if umaren_bets else 0,
+            },
+            "params": {
+                "ev_threshold": params.ev_threshold,
+                "umaren_ev_threshold": params.umaren_ev_threshold,
+                "bet_type": params.bet_type,
+                "bet_amount": params.bet_amount,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Simulation failed: {e}")
+        _simulation_status["error"] = str(e)
+    finally:
+        _simulation_status["is_running"] = False
+
+
+@router.post("/simulate")
+async def start_simulation(
+    background_tasks: BackgroundTasks,
+    params: SimulationParams,
+    db: Session = Depends(get_db),
+):
+    """
+    期待値ベースのシミュレーションを開始
+
+    バックグラウンドで実行され、結果は /api/v1/model/simulate/status で確認できます。
+    """
+    global _simulation_status
+
+    if _simulation_status["is_running"]:
+        raise HTTPException(
+            status_code=409,
+            detail="シミュレーションは既に実行中です"
+        )
+
+    # バックグラウンドで実行
+    background_tasks.add_task(_run_simulation, db, params)
+
+    return {
+        "status": "success",
+        "message": "シミュレーションを開始しました",
+    }
+
+
+@router.get("/simulate/status")
+async def get_simulation_status():
+    """
+    シミュレーションの状態と結果を取得
+    """
+    return {
+        "status": "success",
+        "simulation": _simulation_status,
+    }
+
+
+@router.post("/simulate/sync")
+async def run_simulation_sync(
+    params: SimulationParams,
+    db: Session = Depends(get_db),
+):
+    """
+    シミュレーションを同期実行（小規模データ用）
+
+    結果が即座に返されます。大規模データの場合は /simulate を使用してください。
+    """
+    global _simulation_status
+
+    if _simulation_status["is_running"]:
+        raise HTTPException(
+            status_code=409,
+            detail="シミュレーションは既に実行中です"
+        )
+
+    # 同期実行
+    _run_simulation(db, params)
+
+    if _simulation_status["error"]:
+        raise HTTPException(
+            status_code=500,
+            detail=_simulation_status["error"]
+        )
+
+    return {
+        "status": "success",
+        "results": _simulation_status["results"],
+    }
