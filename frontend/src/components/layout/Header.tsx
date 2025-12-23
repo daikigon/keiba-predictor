@@ -3,7 +3,8 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
-import { Calendar, History, BarChart3, Database, Users, Award, Cpu } from 'lucide-react';
+import { Calendar, History, BarChart3, Database, Users, Award, Cpu, LogOut, Shield, Settings } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
 
 const navigation = [
   { name: 'ダッシュボード', href: '/', icon: BarChart3 },
@@ -13,10 +14,20 @@ const navigation = [
   { name: '予想履歴', href: '/history', icon: History },
   { name: 'データ管理', href: '/data', icon: Database },
   { name: 'モデル', href: '/model', icon: Cpu },
+  { name: '運用管理', href: '/operations', icon: Settings },
 ];
 
 export function Header() {
   const pathname = usePathname();
+  const { user, signOut } = useAuth();
+
+  const handleSignOut = async () => {
+    try {
+      await signOut();
+    } catch (error) {
+      console.error('Sign out error:', error);
+    }
+  };
 
   return (
     <header className="bg-white border-b border-gray-200">
@@ -50,6 +61,29 @@ export function Header() {
               })}
             </nav>
           </div>
+
+          {/* User menu */}
+          {user && (
+            <div className="flex items-center space-x-2 sm:space-x-4">
+              <span className="hidden sm:block text-sm text-gray-600">
+                {user.email}
+              </span>
+              <Link
+                href="/settings/security"
+                className="inline-flex items-center p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-md"
+                title="セキュリティ設定"
+              >
+                <Shield className="w-4 h-4" />
+              </Link>
+              <button
+                onClick={handleSignOut}
+                className="inline-flex items-center px-3 py-2 text-sm font-medium text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-md"
+              >
+                <LogOut className="w-4 h-4 sm:mr-2" />
+                <span className="hidden sm:inline">ログアウト</span>
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
