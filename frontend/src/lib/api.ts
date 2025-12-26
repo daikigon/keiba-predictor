@@ -8,7 +8,7 @@ import {
   getJockeysFromSupabase,
   getStatsFromSupabase,
 } from './supabase-api';
-import type { Race, RaceListResponse, RaceDetailResponse } from '@/types/race';
+import type { RaceListResponse, RaceDetailResponse } from '@/types/race';
 import type {
   Prediction,
   HistoryListResponse,

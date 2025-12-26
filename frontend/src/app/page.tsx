@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/Badge';
 import { RaceList } from '@/components/features/race/RaceList';
 import { ScrapeStatsCard } from '@/components/features/prediction/StatsCard';
 import { getRaces, getScrapeStats, getHistory } from '@/lib/api';
-import { formatDate, formatCurrency, formatPercent } from '@/lib/utils';
+import { formatDate, formatPercent } from '@/lib/utils';
 import { Calendar, TrendingUp, Target, DollarSign } from 'lucide-react';
 
 export const dynamic = 'force-dynamic';

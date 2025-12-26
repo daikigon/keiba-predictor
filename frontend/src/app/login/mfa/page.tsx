@@ -46,7 +46,7 @@ export default function MFAPage() {
     try {
       await verifyMFAChallenge(factorId, challengeId, mfaCode);
       router.push('/');
-    } catch (err) {
+    } catch {
       setError('認証コードが正しくありません');
       setMfaCode('');
       // 新しいチャレンジを作成

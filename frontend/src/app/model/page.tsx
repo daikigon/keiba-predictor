@@ -12,7 +12,6 @@ import {
   startRetraining,
   switchModel,
   getFeatureImportance,
-  startSimulation,
   getSimulationStatus,
   runSimulationSync,
   type CurrentModel,
@@ -33,6 +32,8 @@ import {
   TrendingUp,
   Settings,
   Loader2,
+  AlertTriangle,
+  Server,
 } from 'lucide-react';
 
 export default function ModelPage() {
@@ -45,6 +46,7 @@ export default function ModelPage() {
   const [isRetraining, setIsRetraining] = useState(false);
   const [isSimulating, setIsSimulating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [backendAvailable, setBackendAvailable] = useState(true);
 
   // Training parameters
   const [trainParams, setTrainParams] = useState({
@@ -66,38 +68,46 @@ export default function ModelPage() {
   });
 
   const loadData = useCallback(async () => {
+    let failedCount = 0;
     try {
       const [model, vers, status, features, simStatus] = await Promise.all([
-        getCurrentModel().catch((e) => {
-          console.error('getCurrentModel failed:', e);
+        getCurrentModel().catch(() => {
+          failedCount++;
           return null;
         }),
-        getModelVersions().catch((e) => {
-          console.error('getModelVersions failed:', e);
+        getModelVersions().catch(() => {
+          failedCount++;
           return [];
         }),
-        getRetrainingStatus().catch((e) => {
-          console.error('getRetrainingStatus failed:', e);
+        getRetrainingStatus().catch(() => {
+          failedCount++;
           return null;
         }),
-        getFeatureImportance(15).catch((e) => {
-          console.error('getFeatureImportance failed:', e);
+        getFeatureImportance(15).catch(() => {
+          failedCount++;
           return [];
         }),
-        getSimulationStatus().catch((e) => {
-          console.error('getSimulationStatus failed:', e);
+        getSimulationStatus().catch(() => {
+          failedCount++;
           return null;
         }),
       ]);
+
+      // 全てのAPIが失敗した場合はバックエンドが利用不可
+      if (failedCount >= 5) {
+        setBackendAvailable(false);
+      } else {
+        setBackendAvailable(true);
+      }
+
       setCurrentModel(model);
       setVersions(vers);
       setRetrainingStatus(status);
       setFeatureImportance(features);
       setSimulationStatus(simStatus);
       setError(null);
-    } catch (err) {
-      console.error('Failed to load data:', err);
-      setError(`データの読み込みに失敗しました: ${err instanceof Error ? err.message : String(err)}`);
+    } catch {
+      setBackendAvailable(false);
     } finally {
       setIsLoading(false);
     }
@@ -222,13 +232,39 @@ export default function ModelPage() {
         <p className="text-gray-500 mt-1">機械学習モデルの管理とシミュレーション</p>
       </div>
 
+      {/* FastAPIバックエンド必要の注意書き */}
+      {!backendAvailable && (
+        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <h3 className="font-medium text-amber-800">FastAPIバックエンドが必要です</h3>
+              <p className="text-sm text-amber-700 mt-1">
+                モデル管理機能はローカルのFastAPIバックエンドが必要です。
+                現在はSupabase直接接続モードのため、モデル管理機能は利用できません。
+              </p>
+              <div className="mt-2 text-xs text-amber-600 bg-amber-100 px-2 py-1 rounded inline-flex items-center gap-1">
+                <Server className="w-3 h-3" />
+                FastAPIバックエンド: 停止中
+              </div>
+              <div className="mt-3 p-3 bg-amber-100 rounded text-sm text-amber-800">
+                <p className="font-medium mb-1">バックエンドの起動方法:</p>
+                <code className="block bg-amber-200 px-2 py-1 rounded text-xs mt-1">
+                  cd backend && source venv/bin/activate && uvicorn app.main:app --reload
+                </code>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {error && (
         <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
           {error}
         </div>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className={cn("grid gap-6 lg:grid-cols-2", !backendAvailable && "opacity-60 pointer-events-none")}>
         {/* Current Model Status */}
         <Card>
           <CardHeader>
@@ -467,7 +503,7 @@ export default function ModelPage() {
       </div>
 
       {/* Simulation Section */}
-      <Card className="mt-6">
+      <Card className={cn("mt-6", !backendAvailable && "opacity-60 pointer-events-none")}>
         <CardHeader>
           <div className="flex items-center gap-2">
             <TrendingUp className="w-5 h-5 text-indigo-600" />

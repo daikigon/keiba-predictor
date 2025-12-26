@@ -6,6 +6,7 @@
 
 import os
 import sys
+import json
 from pathlib import Path
 
 # .envファイルを読み込み
@@ -25,6 +26,9 @@ from datetime import date, datetime, timedelta
 from bs4 import BeautifulSoup
 from typing import Optional, List, Dict
 from supabase import create_client
+
+# 進捗出力モード
+PROGRESS_MODE = False
 
 # ===== 設定 =====
 SCRAPE_INTERVAL = 1.0  # リクエスト間隔（秒）- ローカルは少し速く
@@ -47,6 +51,21 @@ session = requests.Session()
 session.headers.update(HEADERS)
 last_request_time = 0
 supabase = None
+
+
+def emit_progress(data: Dict):
+    """進捗をJSON形式で出力（SSE用）"""
+    if PROGRESS_MODE:
+        print(f"PROGRESS:{json.dumps(data, ensure_ascii=False)}", flush=True)
+
+
+def race_exists(race_id: str) -> bool:
+    """レースが既にDBに存在するかチェック"""
+    try:
+        result = supabase.table("entries").select("id").eq("race_id", race_id).limit(1).execute()
+        return len(result.data) > 0
+    except:
+        return False
 
 
 def init_supabase():
@@ -348,36 +367,121 @@ def save_race(race_data: Dict) -> bool:
         return False
 
 
-def scrape_date_range(start_date: date, end_date: date, jra_only: bool = True):
+def scrape_date_range(start_date: date, end_date: date, jra_only: bool = True, force: bool = False):
     """日付範囲でスクレイピング"""
     current = start_date
     total_races = 0
     total_success = 0
+    total_skipped = 0
 
-    while current <= end_date:
+    # 全日付のリスト
+    dates = []
+    temp = start_date
+    while temp <= end_date:
+        dates.append(temp)
+        temp += timedelta(days=1)
+    total_dates = len(dates)
+
+    for date_index, current in enumerate(dates):
         print(f"\n=== {current} ===")
+
+        # 日付の進捗を出力
+        emit_progress({
+            "type": "date_start",
+            "currentDate": current.isoformat(),
+            "currentDateIndex": date_index + 1,
+            "totalDates": total_dates,
+            "scraped": total_success,
+            "skipped": total_skipped,
+        })
+
         races = scrape_race_list(current, jra_only=jra_only)
         print(f"  {len(races)}件のレースが見つかりました")
 
-        for race_info in races:
+        # レース一覧取得完了を出力
+        emit_progress({
+            "type": "list_complete",
+            "currentDate": current.isoformat(),
+            "racesCount": len(races),
+        })
+
+        for i, race_info in enumerate(races):
+            race_id = race_info["race_id"]
+            race_name = race_info.get("race_name", race_id)
+
+            # 進捗を出力
+            emit_progress({
+                "type": "race_start",
+                "currentDate": current.isoformat(),
+                "currentDateIndex": date_index + 1,
+                "totalDates": total_dates,
+                "current": i + 1,
+                "total": len(races),
+                "raceId": race_id,
+                "raceName": race_name,
+                "scraped": total_success,
+                "skipped": total_skipped,
+            })
+
             try:
-                race_detail = scrape_race_detail(race_info["race_id"])
+                # 既存チェック
+                if not force and race_exists(race_id):
+                    total_skipped += 1
+                    print(f"  → {race_id} (スキップ: 既存)")
+                    emit_progress({
+                        "type": "race_skipped",
+                        "raceId": race_id,
+                        "raceName": race_name,
+                        "reason": "既存データ",
+                        "scraped": total_success,
+                        "skipped": total_skipped,
+                    })
+                    continue
+
+                race_detail = scrape_race_detail(race_id)
                 race_detail["date"] = race_info["date"]
 
                 if save_race(race_detail):
                     total_success += 1
-                    print(f"  ✓ {race_info['race_id']}")
+                    entries_count = len(race_detail.get("entries", []))
+                    print(f"  ✓ {race_id} ({entries_count}頭)")
+                    emit_progress({
+                        "type": "race_saved",
+                        "raceId": race_id,
+                        "raceName": race_name,
+                        "entriesCount": entries_count,
+                        "scraped": total_success,
+                        "skipped": total_skipped,
+                    })
                 else:
-                    print(f"  ✗ {race_info['race_id']} (保存エラー)")
+                    print(f"  ✗ {race_id} (保存エラー)")
+                    emit_progress({
+                        "type": "race_error",
+                        "raceId": race_id,
+                        "raceName": race_name,
+                        "error": "保存エラー",
+                    })
 
                 total_races += 1
             except Exception as e:
-                print(f"  ✗ {race_info['race_id']} - {e}")
+                print(f"  ✗ {race_id} - {e}")
+                emit_progress({
+                    "type": "race_error",
+                    "raceId": race_id,
+                    "raceName": race_name,
+                    "error": str(e),
+                })
                 total_races += 1
 
-        current += timedelta(days=1)
+    # 完了を出力
+    emit_progress({
+        "type": "complete",
+        "totalRaces": total_races + total_skipped,
+        "scraped": total_success,
+        "skipped": total_skipped,
+    })
 
-    print(f"\n完了: {total_success}/{total_races}件 保存成功")
+    print(f"\n完了: {total_success}/{total_races + total_skipped}件 保存成功 (スキップ: {total_skipped}件)")
 
 
 def show_stats():
@@ -393,6 +497,7 @@ def show_stats():
 
 
 def main():
+    global PROGRESS_MODE
     import argparse
 
     parser = argparse.ArgumentParser(description="競馬データスクレイピング（ローカル版）")
@@ -400,8 +505,14 @@ def main():
     parser.add_argument("--end", type=str, help="終了日 (YYYY-MM-DD)")
     parser.add_argument("--date", type=str, help="単日指定 (YYYY-MM-DD)")
     parser.add_argument("--stats", action="store_true", help="データ件数を表示")
+    parser.add_argument("--include-local", action="store_true", help="地方競馬も含める（デフォルトはJRAのみ）")
+    parser.add_argument("--progress", action="store_true", help="進捗をJSON形式で出力（SSE用）")
+    parser.add_argument("--force", action="store_true", help="既存データを上書き（スキップしない）")
 
     args = parser.parse_args()
+
+    # 進捗モードの設定
+    PROGRESS_MODE = args.progress
 
     # Supabase初期化
     init_supabase()
@@ -420,9 +531,23 @@ def main():
         # デフォルト: 昨日
         start = end = date.today() - timedelta(days=1)
 
-    print(f"スクレイピング期間: {start} ~ {end}")
-    scrape_date_range(start, end)
-    show_stats()
+    # JRAのみかどうか
+    jra_only = not args.include_local
+    if not PROGRESS_MODE:
+        if jra_only:
+            print("対象: 中央競馬（JRA）のみ")
+        else:
+            print("対象: 中央競馬 + 地方競馬")
+        print(f"スクレイピング期間: {start} ~ {end}")
+        if args.force:
+            print("モード: 上書き（既存データもスクレイピング）")
+        else:
+            print("モード: 新規のみ（既存データはスキップ）")
+
+    scrape_date_range(start, end, jra_only=jra_only, force=args.force)
+
+    if not PROGRESS_MODE:
+        show_stats()
 
 
 if __name__ == "__main__":

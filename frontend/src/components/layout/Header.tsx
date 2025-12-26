@@ -7,14 +7,14 @@ import { Calendar, History, BarChart3, Database, Users, Award, Cpu, LogOut, Shie
 import { useAuth } from '@/contexts/AuthContext';
 
 const navigation = [
-  { name: 'ダッシュボード', href: '/', icon: BarChart3 },
+  { name: 'ホーム', href: '/', icon: BarChart3 },
   { name: 'レース', href: '/races', icon: Calendar },
-  { name: '競走馬', href: '/horses', icon: Award },
-  { name: '騎手', href: '/jockeys', icon: Users },
-  { name: '予想履歴', href: '/history', icon: History },
-  { name: 'データ管理', href: '/data', icon: Database },
+  { name: '競走馬一覧', href: '/horses', icon: Award },
+  { name: '騎手一覧', href: '/jockeys', icon: Users },
+  { name: '履歴', href: '/history', icon: History },
+  { name: 'ローカルDB', href: '/data', icon: Database },
   { name: 'モデル', href: '/model', icon: Cpu },
-  { name: '運用管理', href: '/operations', icon: Settings },
+  { name: '運用', href: '/operations', icon: Settings },
 ];
 
 export function Header() {
@@ -39,7 +39,7 @@ export function Header() {
                 競馬予想AI
               </Link>
             </div>
-            <nav className="hidden sm:ml-8 sm:flex sm:space-x-4">
+            <nav className="hidden sm:ml-6 sm:flex sm:space-x-1">
               {navigation.map((item) => {
                 const isActive = pathname === item.href ||
                   (item.href !== '/' && pathname.startsWith(item.href));
@@ -48,13 +48,14 @@ export function Header() {
                     key={item.name}
                     href={item.href}
                     className={cn(
-                      'inline-flex items-center px-3 py-2 text-sm font-medium rounded-md',
+                      'inline-flex items-center px-2 py-2 text-sm font-medium rounded-md whitespace-nowrap',
                       isActive
                         ? 'bg-blue-50 text-blue-700'
                         : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
                     )}
+                    title={item.name}
                   >
-                    <item.icon className="w-4 h-4 mr-2" />
+                    <item.icon className="w-4 h-4 mr-1" />
                     {item.name}
                   </Link>
                 );
@@ -64,8 +65,8 @@ export function Header() {
 
           {/* User menu */}
           {user && (
-            <div className="flex items-center space-x-2 sm:space-x-4">
-              <span className="hidden sm:block text-sm text-gray-600">
+            <div className="flex items-center space-x-1 sm:space-x-2">
+              <span className="hidden lg:block text-sm text-gray-600 truncate max-w-[150px]">
                 {user.email}
               </span>
               <Link

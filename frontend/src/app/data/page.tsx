@@ -1,8 +1,7 @@
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
-import { ScrapeStatsCard } from '@/components/features/prediction/StatsCard';
 import { ScrapeForm } from '@/components/features/data/ScrapeForm';
 import { getScrapeStats } from '@/lib/api';
-import { Database, Calendar, Users } from 'lucide-react';
+import { Database, Calendar, Users, AlertTriangle, Server } from 'lucide-react';
 
 export const dynamic = 'force-dynamic';
 
@@ -24,15 +23,37 @@ export default async function DataPage() {
         <p className="text-gray-500 mt-1">レースデータのスクレイピングと状況確認</p>
       </div>
 
+      {/* ローカルバックエンド必要の注意書き */}
+      <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
+          <div>
+            <h3 className="font-medium text-amber-800">ローカル環境専用機能</h3>
+            <p className="text-sm text-amber-700 mt-1">
+              この機能はローカルのFastAPIバックエンドが必要です。
+              現在はSupabase直接接続モードのため、スクレイピング機能は
+              <a href="/operations" className="underline font-medium mx-1">運用管理ページ</a>
+              またはコマンドラインをご利用ください。
+            </p>
+            <div className="mt-2 text-xs text-amber-600 bg-amber-100 px-2 py-1 rounded inline-flex items-center gap-1">
+              <Server className="w-3 h-3" />
+              FastAPIバックエンド: 停止中
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div className="grid gap-6 lg:grid-cols-2 mb-8">
         {/* Scrape Form */}
-        <ScrapeForm />
+        <div className="opacity-60 pointer-events-none">
+          <ScrapeForm />
+        </div>
 
         {/* Stats Overview */}
         {stats ? (
           <Card>
             <CardHeader>
-              <CardTitle>データベース統計</CardTitle>
+              <CardTitle>データベース統計（Supabase）</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
@@ -68,11 +89,11 @@ export default async function DataPage() {
           </Card>
         ) : (
           <Card>
-            <CardContent className="py-12 text-center">
-              <p className="text-gray-500">データを取得できませんでした</p>
-              <p className="text-sm text-gray-400 mt-1">
-                バックエンドサーバーが起動しているか確認してください
-              </p>
+            <CardHeader>
+              <CardTitle>データベース統計（Supabase）</CardTitle>
+            </CardHeader>
+            <CardContent className="py-8 text-center">
+              <p className="text-gray-500">統計データを取得できませんでした</p>
             </CardContent>
           </Card>
         )}
@@ -81,33 +102,36 @@ export default async function DataPage() {
       {/* Instructions */}
       <Card>
         <CardHeader>
-          <CardTitle>コマンドラインからのデータ取得</CardTitle>
+          <CardTitle>コマンドラインからのデータ取得（推奨）</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="space-y-6">
             <div>
               <h4 className="font-medium text-gray-900 mb-2">
-                一括データ投入
+                Supabase直接スクレイピング
               </h4>
               <div className="bg-gray-900 text-gray-100 p-4 rounded-lg font-mono text-sm overflow-x-auto">
-                <p># デモデータを作成</p>
-                <p className="text-green-400">python scripts/init_data.py --demo</p>
-                <p className="mt-2"># 過去7日分のデータをスクレイピング</p>
-                <p className="text-green-400">python scripts/init_data.py --days 7</p>
+                <p># 特定の日付を取得</p>
+                <p className="text-green-400">python3 scripts/scrape_local.py --date 2024-12-22</p>
                 <p className="mt-2"># 期間指定でスクレイピング</p>
-                <p className="text-green-400">python scripts/init_data.py --from 2024-12-01 --to 2024-12-22</p>
+                <p className="text-green-400">python3 scripts/scrape_local.py --start 2024-12-01 --end 2024-12-22</p>
+                <p className="mt-2"># データ件数確認</p>
+                <p className="text-green-400">python3 scripts/scrape_local.py --stats</p>
               </div>
             </div>
 
-            <div>
+            <div className="p-4 bg-gray-50 rounded-lg">
               <h4 className="font-medium text-gray-900 mb-2">
-                モデル学習
+                ローカルFastAPIバックエンドを使う場合
               </h4>
+              <p className="text-sm text-gray-600 mb-3">
+                大量データの高速処理が必要な場合は、ローカルPostgreSQLとFastAPIバックエンドを起動してください。
+              </p>
               <div className="bg-gray-900 text-gray-100 p-4 rounded-lg font-mono text-sm overflow-x-auto">
-                <p># モデルを学習</p>
-                <p className="text-green-400">python ml/train.py</p>
-                <p className="mt-2"># モデルを評価</p>
-                <p className="text-green-400">python ml/evaluate.py --detail</p>
+                <p># PostgreSQL起動（Homebrew）</p>
+                <p className="text-green-400">brew services start postgresql</p>
+                <p className="mt-2"># FastAPIバックエンド起動</p>
+                <p className="text-green-400">cd backend && source venv/bin/activate && uvicorn app.main:app --reload</p>
               </div>
             </div>
           </div>

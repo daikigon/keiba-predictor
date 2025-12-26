@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/Table';
 import { getJockeyDetail } from '@/lib/api';
 import type { JockeyDetail } from '@/lib/api';
-import { ArrowLeft, TrendingUp } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 
 export default function JockeyDetailPage() {
   const params = useParams();

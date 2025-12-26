@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import {
@@ -107,12 +107,7 @@ export function ScrapeForm() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSkippedList, setShowSkippedList] = useState(false);
-  const [history, setHistory] = useState<ScrapeHistory[]>([]);
-
-  // Load history on mount
-  useEffect(() => {
-    setHistory(loadHistory());
-  }, []);
+  const [history, setHistory] = useState<ScrapeHistory[]>(() => loadHistory());
 
   const addToHistory = (entry: ScrapeHistory) => {
     const newHistory = [

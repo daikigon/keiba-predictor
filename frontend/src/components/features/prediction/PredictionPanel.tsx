@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { cn } from '@/lib/utils';
 import { CONFIDENCE_COLORS } from '@/lib/constants';
-import { createPrediction, getPrediction } from '@/lib/api';
+import { createPrediction } from '@/lib/api';
 import type { Prediction, PredictionHorse, RecommendedBet } from '@/types/prediction';
 
 interface PredictionPanelProps {

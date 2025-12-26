@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { RaceList } from '@/components/features/race/RaceList';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
+import { Card, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { getRaces } from '@/lib/api';
 import { formatDate } from '@/lib/utils';
@@ -22,7 +22,7 @@ export default function RacesPage() {
       try {
         const data = await getRaces(date);
         setRaces(data.races);
-      } catch (err) {
+      } catch {
         setError('レースの取得に失敗しました');
         setRaces([]);
       } finally {

@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { ArrowLeft, Shield, ShieldCheck, Loader2, QrCode, Trash2 } from 'lucide-react';
 import {
@@ -13,7 +12,6 @@ import {
 } from '@/lib/auth';
 
 export default function SecuritySettingsPage() {
-  const router = useRouter();
   const [factors, setFactors] = useState<MFAFactor[]>([]);
   const [loading, setLoading] = useState(true);
   const [enrolling, setEnrolling] = useState(false);

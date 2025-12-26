@@ -3,7 +3,7 @@
  *
  * Vercelデプロイ時（FastAPIバックエンドなし）に使用
  */
-import { supabase, DbRace, DbEntry, DbHorse, DbJockey, DbPrediction } from './supabase';
+import { supabase, DbRace, DbEntry, DbHorse, DbJockey } from './supabase';
 import type { Race, RaceListResponse, RaceDetailResponse, Entry } from '@/types/race';
 import type { Prediction } from '@/types/prediction';
 
