@@ -137,6 +137,24 @@ class RaceDetailScraper(BaseScraper):
                     race_data["grade"] = grade.replace("(", "").replace(")", "")
                     break
 
+            # Weather (天気)
+            weather_match = re.search(r"天候\s*:\s*(晴|曇|雨|小雨|小雪|雪)", text)
+            if weather_match:
+                race_data["weather"] = weather_match.group(1)
+
+            # Number of horses (頭数)
+            num_horses_match = re.search(r"(\d+)頭", text)
+            if num_horses_match:
+                race_data["num_horses"] = int(num_horses_match.group(1))
+
+        # Venue detail (開催) - e.g., "1回京都2日目"
+        venue_elem = soup.select_one(".mainrace_data .racedata p, .data_intro .smalltxt, .race_otherdata p")
+        if venue_elem:
+            venue_text = venue_elem.get_text(strip=True)
+            venue_match = re.search(r"(\d+)回(\S+?)(\d+)日", venue_text)
+            if venue_match:
+                race_data["venue_detail"] = f"{venue_match.group(1)}{venue_match.group(2)}{venue_match.group(3)}"
+
         return race_data
 
     def _parse_entries(self, soup) -> list[dict]:
@@ -230,7 +248,43 @@ class RaceDetailScraper(BaseScraper):
         except IndexError:
             pass
 
-        # Cell 10: Odds (単勝オッズ) - may vary by table structure
+        # Cell 8: Margin (着差)
+        try:
+            if len(cells) > 8:
+                margin_text = cells[8].get_text(strip=True)
+                if margin_text:
+                    entry["margin"] = margin_text
+        except IndexError:
+            pass
+
+        # Cell 10: Corner position (通過)
+        try:
+            if len(cells) > 10:
+                corner_text = cells[10].get_text(strip=True)
+                if corner_text and re.match(r"[\d\-]+", corner_text):
+                    entry["corner_position"] = corner_text
+        except IndexError:
+            pass
+
+        # Cell 11: Pace (ペース)
+        try:
+            if len(cells) > 11:
+                pace_text = cells[11].get_text(strip=True)
+                if pace_text and "-" in pace_text:
+                    entry["pace"] = pace_text
+        except IndexError:
+            pass
+
+        # Cell 17: Last 3F (上がり3F)
+        try:
+            if len(cells) > 17:
+                last3f_text = cells[17].get_text(strip=True)
+                if last3f_text:
+                    entry["last_3f"] = float(last3f_text)
+        except (ValueError, IndexError):
+            pass
+
+        # Cell 12: Odds (単勝オッズ) - may vary by table structure
         try:
             if len(cells) > 12:
                 odds_text = cells[12].get_text(strip=True)
@@ -239,12 +293,35 @@ class RaceDetailScraper(BaseScraper):
         except (ValueError, IndexError):
             pass
 
-        # Cell 11: Popularity (人気)
+        # Cell 13: Popularity (人気)
         try:
             if len(cells) > 13:
                 pop_text = cells[13].get_text(strip=True)
                 if pop_text.isdigit():
                     entry["popularity"] = int(pop_text)
+        except (ValueError, IndexError):
+            pass
+
+        # Cell 14: Horse weight (馬体重)
+        try:
+            if len(cells) > 14:
+                weight_text = cells[14].get_text(strip=True)
+                if weight_text:
+                    weight_match = re.match(r"(\d+)\(([+-]?\d+)\)", weight_text)
+                    if weight_match:
+                        entry["horse_weight"] = int(weight_match.group(1))
+                        entry["weight_diff"] = int(weight_match.group(2))
+                    elif weight_text.isdigit():
+                        entry["horse_weight"] = int(weight_text)
+        except (ValueError, IndexError):
+            pass
+
+        # Cell 20: Prize money (賞金)
+        try:
+            if len(cells) > 20:
+                prize_text = cells[20].get_text(strip=True).replace(",", "")
+                if prize_text and prize_text.replace(".", "").isdigit():
+                    entry["prize_money"] = int(float(prize_text))
         except (ValueError, IndexError):
             pass
 

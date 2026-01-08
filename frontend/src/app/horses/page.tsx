@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -12,9 +12,9 @@ import {
   TableHead,
   TableCell,
 } from '@/components/ui/Table';
-import { getHorses } from '@/lib/api';
-import type { Horse } from '@/lib/api';
-import { Search, ChevronRight } from 'lucide-react';
+import { getHorses, startBulkRescrape, getBulkRescrapeStatus } from '@/lib/api';
+import type { Horse, BulkRescrapeStatus } from '@/lib/api';
+import { Search, ChevronRight, RefreshCw } from 'lucide-react';
 
 export default function HorsesPage() {
   const [horses, setHorses] = useState<Horse[]>([]);
@@ -26,26 +26,75 @@ export default function HorsesPage() {
   const [sexFilter, setSexFilter] = useState('');
   const limit = 50;
 
-  useEffect(() => {
-    async function fetchHorses() {
-      setIsLoading(true);
-      try {
-        const data = await getHorses({
-          search: search || undefined,
-          sex: sexFilter || undefined,
-          limit,
-          offset,
-        });
-        setHorses(data.horses);
-        setTotal(data.total);
-      } catch (error) {
-        console.error('Failed to fetch horses:', error);
-      } finally {
-        setIsLoading(false);
-      }
+  // Bulk rescrape state
+  const [bulkStatus, setBulkStatus] = useState<BulkRescrapeStatus | null>(null);
+  const [isStartingBulk, setIsStartingBulk] = useState(false);
+
+  const fetchHorses = useCallback(async () => {
+    setIsLoading(true);
+    try {
+      const data = await getHorses({
+        search: search || undefined,
+        sex: sexFilter || undefined,
+        limit,
+        offset,
+      });
+      setHorses(data.horses);
+      setTotal(data.total);
+    } catch (error) {
+      console.error('Failed to fetch horses:', error);
+    } finally {
+      setIsLoading(false);
     }
-    fetchHorses();
   }, [offset, search, sexFilter]);
+
+  useEffect(() => {
+    fetchHorses();
+  }, [fetchHorses]);
+
+  // Poll bulk rescrape status
+  useEffect(() => {
+    const checkStatus = async () => {
+      try {
+        const status = await getBulkRescrapeStatus();
+        setBulkStatus(status);
+      } catch (error) {
+        console.error('Failed to get bulk rescrape status:', error);
+      }
+    };
+
+    checkStatus();
+
+    // Poll every 2 seconds while running
+    const interval = setInterval(async () => {
+      try {
+        const status = await getBulkRescrapeStatus();
+        setBulkStatus(status);
+        if (!status.is_running && status.results) {
+          // Refresh horse list when done
+          fetchHorses();
+        }
+      } catch (error) {
+        console.error('Failed to get bulk rescrape status:', error);
+      }
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, [fetchHorses]);
+
+  const handleStartBulkRescrape = async () => {
+    setIsStartingBulk(true);
+    try {
+      await startBulkRescrape();
+      const status = await getBulkRescrapeStatus();
+      setBulkStatus(status);
+    } catch (error) {
+      console.error('Failed to start bulk rescrape:', error);
+      alert('一括補完の開始に失敗しました');
+    } finally {
+      setIsStartingBulk(false);
+    }
+  };
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,12 +105,88 @@ export default function HorsesPage() {
   const hasMore = offset + limit < total;
   const hasPrev = offset > 0;
 
+  const progressPercent = bulkStatus?.total ? Math.round((bulkStatus.progress / bulkStatus.total) * 100) : 0;
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">競走馬管理</h1>
-        <p className="text-gray-500 mt-1">登録されている競走馬の一覧</p>
+      <div className="mb-8 flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">競走馬管理</h1>
+          <p className="text-gray-500 mt-1">登録されている競走馬の一覧</p>
+        </div>
+        <Button
+          onClick={handleStartBulkRescrape}
+          disabled={isStartingBulk || bulkStatus?.is_running}
+          className="inline-flex items-center"
+        >
+          <RefreshCw className={`w-4 h-4 mr-2 ${bulkStatus?.is_running ? 'animate-spin' : ''}`} />
+          {bulkStatus?.is_running ? '補完中...' : '全馬一括補完'}
+        </Button>
       </div>
+
+      {/* Bulk Rescrape Progress */}
+      {bulkStatus?.is_running && (
+        <Card className="mb-6 bg-blue-50 border-blue-200">
+          <CardContent className="py-4">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-blue-800">
+                一括補完実行中: {bulkStatus.current_horse || '準備中...'}
+              </span>
+              <span className="text-sm text-blue-600">
+                {bulkStatus.progress} / {bulkStatus.total} ({progressPercent}%)
+              </span>
+            </div>
+            <div className="w-full bg-blue-200 rounded-full h-2">
+              <div
+                className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${progressPercent}%` }}
+              />
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Bulk Rescrape Results */}
+      {bulkStatus?.results && !bulkStatus.is_running && (
+        <Card className="mb-6 bg-green-50 border-green-200">
+          <CardContent className="py-4">
+            <p className="font-medium text-green-800 mb-2">一括補完完了</p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+              <div>
+                <span className="text-green-600">処理馬数:</span>
+                <span className="ml-2 font-medium">{bulkStatus.results.processed_horses}頭</span>
+              </div>
+              <div>
+                <span className="text-green-600">取得レース:</span>
+                <span className="ml-2 font-medium">{bulkStatus.results.total_scraped_races}件</span>
+              </div>
+              <div>
+                <span className="text-green-600">新規Entry:</span>
+                <span className="ml-2 font-medium">{bulkStatus.results.created_entries}件</span>
+              </div>
+              <div>
+                <span className="text-green-600">新規Race:</span>
+                <span className="ml-2 font-medium">{bulkStatus.results.created_races}件</span>
+              </div>
+            </div>
+            {bulkStatus.results.failed_horses > 0 && (
+              <p className="mt-2 text-sm text-orange-600">
+                失敗: {bulkStatus.results.failed_horses}頭
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Bulk Rescrape Error */}
+      {bulkStatus?.error && !bulkStatus.is_running && (
+        <Card className="mb-6 bg-red-50 border-red-200">
+          <CardContent className="py-4">
+            <p className="font-medium text-red-800">一括補完エラー</p>
+            <p className="text-sm text-red-600 mt-1">{bulkStatus.error}</p>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Search and Filter */}
       <Card className="mb-6">

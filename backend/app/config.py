@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +10,11 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = "postgresql://postgres:password@localhost:5432/keiba_db"
+
+    # Supabase (for model storage)
+    SUPABASE_URL: Optional[str] = None
+    SUPABASE_KEY: Optional[str] = None
+    SUPABASE_MODEL_BUCKET: str = "models"
 
     # Server
     HOST: str = "0.0.0.0"

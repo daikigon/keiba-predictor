@@ -36,6 +36,20 @@ import {
   Server,
 } from 'lucide-react';
 
+// SSE進捗イベントの型
+type TrainingProgress = {
+  type: string;
+  step?: string;
+  message?: string;
+  progress_percent?: number;
+  train_rmse?: number;
+  valid_rmse?: number;
+  num_samples?: number;
+  num_features?: number;
+  version?: string;
+  error?: string;
+};
+
 export default function ModelPage() {
   const [currentModel, setCurrentModel] = useState<CurrentModel | null>(null);
   const [versions, setVersions] = useState<ModelVersion[]>([]);
@@ -47,6 +61,10 @@ export default function ModelPage() {
   const [isSimulating, setIsSimulating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [backendAvailable, setBackendAvailable] = useState(true);
+
+  // SSE進捗状態
+  const [trainingProgress, setTrainingProgress] = useState<TrainingProgress | null>(null);
+  const [progressLogs, setProgressLogs] = useState<string[]>([]);
 
   // Training parameters
   const [trainParams, setTrainParams] = useState({
@@ -156,6 +174,9 @@ export default function ModelPage() {
 
     setIsRetraining(true);
     setError(null);
+    setTrainingProgress(null);
+    setProgressLogs([]);
+
     try {
       const params = trainParams.use_time_split
         ? {
@@ -167,13 +188,45 @@ export default function ModelPage() {
         : {
             num_boost_round: trainParams.num_boost_round,
           };
+
+      // 再学習を開始
       await startRetraining(params);
-      const status = await getRetrainingStatus();
-      setRetrainingStatus(status);
+
+      // SSEストリームに接続
+      const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
+      const eventSource = new EventSource(`${apiBase}/api/v1/model/status/stream`);
+
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data) as TrainingProgress;
+          setTrainingProgress(data);
+
+          // ログにメッセージを追加
+          if (data.message) {
+            setProgressLogs((prev) => [...prev, `[${data.type}] ${data.message}`]);
+          }
+
+          // 完了またはエラー時にSSE接続を閉じる
+          if (data.type === 'complete' || data.type === 'error') {
+            eventSource.close();
+            setIsRetraining(false);
+            loadData(); // データをリロード
+          }
+        } catch (e) {
+          console.error('Failed to parse SSE data:', e);
+        }
+      };
+
+      eventSource.onerror = () => {
+        eventSource.close();
+        setIsRetraining(false);
+        // エラー時もステータスを確認
+        getRetrainingStatus().then((status) => setRetrainingStatus(status));
+      };
+
     } catch (err) {
       setError('再学習の開始に失敗しました');
       console.error(err);
-    } finally {
       setIsRetraining(false);
     }
   };
@@ -371,12 +424,56 @@ export default function ModelPage() {
               </div>
 
               {/* ステータス表示 */}
-              {retrainingStatus?.is_running ? (
+              {(isRetraining || retrainingStatus?.is_running) ? (
                 <div className="space-y-3 p-3 bg-blue-50 rounded-lg">
                   <div className="flex items-center gap-2 text-blue-600">
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>再学習中... ({retrainingStatus.progress})</span>
+                    <span>
+                      再学習中...
+                      {trainingProgress?.message && ` - ${trainingProgress.message}`}
+                    </span>
                   </div>
+
+                  {/* 進捗バー */}
+                  {trainingProgress?.progress_percent !== undefined && (
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-xs text-gray-600">
+                        <span>{trainingProgress.step || 'processing'}</span>
+                        <span>{trainingProgress.progress_percent}%</span>
+                      </div>
+                      <div className="w-full bg-blue-200 rounded-full h-2">
+                        <div
+                          className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                          style={{ width: `${trainingProgress.progress_percent}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 学習メトリクス */}
+                  {trainingProgress?.train_rmse && (
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div className="bg-white p-2 rounded">
+                        <span className="text-gray-500">Train RMSE:</span>
+                        <span className="ml-1 font-medium">{trainingProgress.train_rmse.toFixed(4)}</span>
+                      </div>
+                      {trainingProgress.valid_rmse && (
+                        <div className="bg-white p-2 rounded">
+                          <span className="text-gray-500">Valid RMSE:</span>
+                          <span className="ml-1 font-medium">{trainingProgress.valid_rmse.toFixed(4)}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* ログ表示 */}
+                  {progressLogs.length > 0 && (
+                    <div className="mt-2 max-h-32 overflow-y-auto bg-gray-900 text-green-400 text-xs p-2 rounded font-mono">
+                      {progressLogs.map((log, i) => (
+                        <div key={i}>{log}</div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ) : retrainingStatus?.result ? (
                 <div className="space-y-2 p-3 bg-green-50 rounded-lg">

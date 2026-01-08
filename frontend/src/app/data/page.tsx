@@ -1,7 +1,8 @@
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { ScrapeForm } from '@/components/features/data/ScrapeForm';
 import { getScrapeStats } from '@/lib/api';
-import { Database, Calendar, Users, AlertTriangle, Server } from 'lucide-react';
+import { Database, Calendar, Users, AlertTriangle, Server, CheckCircle } from 'lucide-react';
+import { API_BASE_URL } from '@/lib/constants';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,8 +14,24 @@ async function getStats() {
   }
 }
 
+async function checkBackendHealth(): Promise<boolean> {
+  if (!API_BASE_URL) return false;
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1/stats/scrape`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(3000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export default async function DataPage() {
-  const stats = await getStats();
+  const [stats, isBackendAvailable] = await Promise.all([
+    getStats(),
+    checkBackendHealth(),
+  ]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -23,29 +40,47 @@ export default async function DataPage() {
         <p className="text-gray-500 mt-1">レースデータのスクレイピングと状況確認</p>
       </div>
 
-      {/* ローカルバックエンド必要の注意書き */}
-      <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
-        <div className="flex items-start gap-3">
-          <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
-          <div>
-            <h3 className="font-medium text-amber-800">ローカル環境専用機能</h3>
-            <p className="text-sm text-amber-700 mt-1">
-              この機能はローカルのFastAPIバックエンドが必要です。
-              現在はSupabase直接接続モードのため、スクレイピング機能は
-              <a href="/operations" className="underline font-medium mx-1">運用管理ページ</a>
-              またはコマンドラインをご利用ください。
-            </p>
-            <div className="mt-2 text-xs text-amber-600 bg-amber-100 px-2 py-1 rounded inline-flex items-center gap-1">
-              <Server className="w-3 h-3" />
-              FastAPIバックエンド: 停止中
+      {/* バックエンド状態表示 */}
+      {isBackendAvailable ? (
+        <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+          <div className="flex items-start gap-3">
+            <CheckCircle className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <h3 className="font-medium text-green-800">ローカルバックエンド接続中</h3>
+              <p className="text-sm text-green-700 mt-1">
+                FastAPIバックエンドに接続しています。スクレイピング機能が利用可能です。
+              </p>
+              <div className="mt-2 text-xs text-green-600 bg-green-100 px-2 py-1 rounded inline-flex items-center gap-1">
+                <Server className="w-3 h-3" />
+                FastAPIバックエンド: 稼働中
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      ) : (
+        <div className="mb-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" />
+            <div>
+              <h3 className="font-medium text-amber-800">ローカル環境専用機能</h3>
+              <p className="text-sm text-amber-700 mt-1">
+                この機能はローカルのFastAPIバックエンドが必要です。
+                現在はSupabase直接接続モードのため、スクレイピング機能は
+                <a href="/operations" className="underline font-medium mx-1">運用管理ページ</a>
+                またはコマンドラインをご利用ください。
+              </p>
+              <div className="mt-2 text-xs text-amber-600 bg-amber-100 px-2 py-1 rounded inline-flex items-center gap-1">
+                <Server className="w-3 h-3" />
+                FastAPIバックエンド: 停止中
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2 mb-8">
         {/* Scrape Form */}
-        <div className="opacity-60 pointer-events-none">
+        <div className={isBackendAvailable ? '' : 'opacity-60 pointer-events-none'}>
           <ScrapeForm />
         </div>
 
@@ -53,7 +88,7 @@ export default async function DataPage() {
         {stats ? (
           <Card>
             <CardHeader>
-              <CardTitle>データベース統計（Supabase）</CardTitle>
+              <CardTitle>データベース統計（{isBackendAvailable ? 'ローカルDB' : 'Supabase'}）</CardTitle>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
@@ -90,7 +125,7 @@ export default async function DataPage() {
         ) : (
           <Card>
             <CardHeader>
-              <CardTitle>データベース統計（Supabase）</CardTitle>
+              <CardTitle>データベース統計（{isBackendAvailable ? 'ローカルDB' : 'Supabase'}）</CardTitle>
             </CardHeader>
             <CardContent className="py-8 text-center">
               <p className="text-gray-500">統計データを取得できませんでした</p>

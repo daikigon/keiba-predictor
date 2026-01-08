@@ -12,9 +12,9 @@ import {
   TableHead,
   TableCell,
 } from '@/components/ui/Table';
-import { getHorseDetail } from '@/lib/api';
-import type { HorseDetail } from '@/lib/api';
-import { ArrowLeft } from 'lucide-react';
+import { getHorseDetail, rescrapeHorseData } from '@/lib/api';
+import type { HorseDetail, RescrapeResult } from '@/lib/api';
+import { ArrowLeft, RefreshCw } from 'lucide-react';
 
 export default function HorseDetailPage() {
   const params = useParams();
@@ -22,24 +22,52 @@ export default function HorseDetailPage() {
   const [horse, setHorse] = useState<HorseDetail | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isRescraping, setIsRescraping] = useState(false);
+  const [rescrapeResult, setRescrapeResult] = useState<RescrapeResult | null>(null);
+
+  const fetchHorse = async () => {
+    setIsLoading(true);
+    try {
+      const data = await getHorseDetail(horseId);
+      setHorse(data);
+    } catch (err) {
+      setError('競走馬データの取得に失敗しました');
+      console.error('Failed to fetch horse:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   useEffect(() => {
-    async function fetchHorse() {
-      setIsLoading(true);
-      try {
-        const data = await getHorseDetail(horseId);
-        setHorse(data);
-      } catch (err) {
-        setError('競走馬データの取得に失敗しました');
-        console.error('Failed to fetch horse:', err);
-      } finally {
-        setIsLoading(false);
-      }
-    }
     if (horseId) {
       fetchHorse();
     }
   }, [horseId]);
+
+  const handleRescrape = async () => {
+    setIsRescraping(true);
+    setRescrapeResult(null);
+    try {
+      const result = await rescrapeHorseData(horseId);
+      setRescrapeResult(result);
+      // Refresh horse data after successful rescrape
+      await fetchHorse();
+    } catch (err) {
+      console.error('Failed to rescrape:', err);
+      setRescrapeResult({
+        success: false,
+        horse_id: horseId,
+        horse_name: horse?.name || '',
+        scraped_races: 0,
+        updated_entries: 0,
+        created_entries: 0,
+        updated_races: 0,
+        created_races: 0,
+      });
+    } finally {
+      setIsRescraping(false);
+    }
+  };
 
   if (isLoading) {
     return (
@@ -71,8 +99,38 @@ export default function HorseDetailPage() {
           <ArrowLeft className="w-4 h-4 mr-1" />
           競走馬一覧に戻る
         </Link>
-        <h1 className="text-2xl font-bold text-gray-900">{horse.name}</h1>
-        <p className="text-gray-500 mt-1">競走馬詳細情報</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">{horse.name}</h1>
+            <p className="text-gray-500 mt-1">競走馬詳細情報</p>
+          </div>
+          <button
+            onClick={handleRescrape}
+            disabled={isRescraping}
+            className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <RefreshCw className={`w-4 h-4 mr-2 ${isRescraping ? 'animate-spin' : ''}`} />
+            {isRescraping ? '取得中...' : 'データ補完'}
+          </button>
+        </div>
+
+        {/* Rescrape Result */}
+        {rescrapeResult && (
+          <div className={`mt-4 p-4 rounded-lg ${rescrapeResult.success ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'}`}>
+            {rescrapeResult.success ? (
+              <div>
+                <p className="font-medium">データ補完完了</p>
+                <p className="text-sm mt-1">
+                  スクレイピング: {rescrapeResult.scraped_races}レース /
+                  新規作成: {rescrapeResult.created_entries}件のEntry, {rescrapeResult.created_races}件のRace /
+                  更新: {rescrapeResult.updated_entries}件のEntry, {rescrapeResult.updated_races}件のRace
+                </p>
+              </div>
+            ) : (
+              <p className="font-medium">データ補完に失敗しました</p>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2 mb-8">
@@ -131,64 +189,139 @@ export default function HorseDetailPage() {
               出走履歴がありません
             </div>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>日付</TableHead>
-                  <TableHead>レース名</TableHead>
-                  <TableHead>コース</TableHead>
-                  <TableHead className="text-center">馬番</TableHead>
-                  <TableHead className="text-center">着順</TableHead>
-                  <TableHead className="text-center">人気</TableHead>
-                  <TableHead className="text-right">オッズ</TableHead>
-                  <TableHead>騎手</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {horse.race_history.map((race, index) => (
-                  <TableRow key={`${race.race_id}-${index}`}>
-                    <TableCell className="text-gray-500 text-sm">
-                      {race.date || '-'}
-                    </TableCell>
-                    <TableCell className="font-medium">
-                      <Link
-                        href={`/races/${race.race_id}`}
-                        className="text-blue-600 hover:text-blue-800"
-                      >
-                        {race.race_name}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="text-gray-600">
-                      {race.course} {race.track_type} {race.distance}m
-                    </TableCell>
-                    <TableCell className="text-center">
-                      {race.horse_number}
-                    </TableCell>
-                    <TableCell className="text-center">
-                      {race.result ? (
-                        <span className={`font-medium ${
-                          race.result === 1 ? 'text-yellow-600' :
-                          race.result === 2 ? 'text-gray-500' :
-                          race.result === 3 ? 'text-orange-600' :
-                          'text-gray-600'
-                        }`}>
-                          {race.result}着
-                        </span>
-                      ) : '-'}
-                    </TableCell>
-                    <TableCell className="text-center">
-                      {race.popularity ? `${race.popularity}人気` : '-'}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {race.odds || '-'}
-                    </TableCell>
-                    <TableCell className="text-gray-600">
-                      {race.jockey_name || '-'}
-                    </TableCell>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>日付</TableHead>
+                    <TableHead>開催</TableHead>
+                    <TableHead>天気</TableHead>
+                    <TableHead className="text-center">頭数</TableHead>
+                    <TableHead className="text-center">R</TableHead>
+                    <TableHead>レース名</TableHead>
+                    <TableHead className="text-center">着順</TableHead>
+                    <TableHead className="text-center">枠</TableHead>
+                    <TableHead className="text-center">馬番</TableHead>
+                    <TableHead className="text-right">オッズ</TableHead>
+                    <TableHead className="text-center">人気</TableHead>
+                    <TableHead>着差</TableHead>
+                    <TableHead>騎手</TableHead>
+                    <TableHead className="text-right">斤量</TableHead>
+                    <TableHead>距離</TableHead>
+                    <TableHead>馬場</TableHead>
+                    <TableHead className="text-right">タイム</TableHead>
+                    <TableHead>通過</TableHead>
+                    <TableHead>ペース</TableHead>
+                    <TableHead className="text-right">上り</TableHead>
+                    <TableHead className="text-right">馬体重</TableHead>
+                    <TableHead>勝ち馬</TableHead>
+                    <TableHead className="text-right">賞金</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {horse.race_history.map((race, index) => (
+                    <TableRow key={`${race.race_id}-${index}`}>
+                      <TableCell className="text-gray-500 text-sm whitespace-nowrap">
+                        {race.date || '-'}
+                      </TableCell>
+                      <TableCell className="text-gray-600 text-sm whitespace-nowrap">
+                        {race.venue_detail || '-'}
+                      </TableCell>
+                      <TableCell className="text-gray-600 text-sm">
+                        {race.weather || '-'}
+                      </TableCell>
+                      <TableCell className="text-center text-gray-600">
+                        {race.num_horses || '-'}
+                      </TableCell>
+                      <TableCell className="text-center text-gray-600">
+                        {race.race_number || '-'}
+                      </TableCell>
+                      <TableCell className="font-medium whitespace-nowrap">
+                        <Link
+                          href={`/races/${race.race_id}`}
+                          className="text-blue-600 hover:text-blue-800"
+                        >
+                          {race.race_name}
+                        </Link>
+                      </TableCell>
+                      <TableCell className="text-center">
+                        {race.result ? (
+                          <span className={`font-medium ${
+                            race.result === 1 ? 'text-yellow-600' :
+                            race.result === 2 ? 'text-gray-500' :
+                            race.result === 3 ? 'text-orange-600' :
+                            'text-gray-600'
+                          }`}>
+                            {race.result}
+                          </span>
+                        ) : '-'}
+                      </TableCell>
+                      <TableCell className="text-center text-gray-600">
+                        {race.frame_number || '-'}
+                      </TableCell>
+                      <TableCell className="text-center">
+                        {race.horse_number}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {race.odds || '-'}
+                      </TableCell>
+                      <TableCell className="text-center text-gray-600">
+                        {race.popularity || '-'}
+                      </TableCell>
+                      <TableCell className="text-gray-600 text-sm">
+                        {race.margin || '-'}
+                      </TableCell>
+                      <TableCell className="text-gray-600 whitespace-nowrap">
+                        {race.jockey_name || '-'}
+                      </TableCell>
+                      <TableCell className="text-right text-gray-600">
+                        {race.weight || '-'}
+                      </TableCell>
+                      <TableCell className="text-gray-600 whitespace-nowrap">
+                        {race.track_type}{race.distance}
+                      </TableCell>
+                      <TableCell className="text-gray-600">
+                        {race.condition || '-'}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-gray-600">
+                        {race.finish_time || '-'}
+                      </TableCell>
+                      <TableCell className="text-gray-600 text-sm">
+                        {race.corner_position || '-'}
+                      </TableCell>
+                      <TableCell className="text-gray-600 text-sm whitespace-nowrap">
+                        {race.pace || '-'}
+                      </TableCell>
+                      <TableCell className="text-right font-mono text-gray-600">
+                        {race.last_3f ? race.last_3f.toFixed(1) : '-'}
+                      </TableCell>
+                      <TableCell className="text-right text-gray-600 whitespace-nowrap">
+                        {race.horse_weight ? (
+                          <>
+                            {race.horse_weight}
+                            {race.weight_diff !== undefined && race.weight_diff !== null && (
+                              <span className={`ml-1 text-xs ${
+                                race.weight_diff > 0 ? 'text-red-500' :
+                                race.weight_diff < 0 ? 'text-blue-500' :
+                                'text-gray-400'
+                              }`}>
+                                ({race.weight_diff > 0 ? '+' : ''}{race.weight_diff})
+                              </span>
+                            )}
+                          </>
+                        ) : '-'}
+                      </TableCell>
+                      <TableCell className="text-gray-600 text-sm whitespace-nowrap">
+                        {race.winner_or_second || '-'}
+                      </TableCell>
+                      <TableCell className="text-right text-gray-600">
+                        {race.prize_money ? `${race.prize_money.toLocaleString()}` : '-'}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           )}
         </CardContent>
       </Card>

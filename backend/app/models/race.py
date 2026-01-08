@@ -25,6 +25,8 @@ class Race(Base):
     weather: Mapped[Optional[str]] = mapped_column(String(10))
     condition: Mapped[Optional[str]] = mapped_column(String(10))
     grade: Mapped[Optional[str]] = mapped_column(String(10))
+    num_horses: Mapped[Optional[int]] = mapped_column(Integer)  # 頭数
+    venue_detail: Mapped[Optional[str]] = mapped_column(String(20))  # 開催 (例: "1京都2")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
@@ -67,6 +69,9 @@ class Entry(Base):
     margin: Mapped[Optional[str]] = mapped_column(String(20))
     corner_position: Mapped[Optional[str]] = mapped_column(String(20))
     last_3f: Mapped[Optional[float]] = mapped_column()
+    pace: Mapped[Optional[str]] = mapped_column(String(20))  # ペース (例: "35.4-38.1")
+    prize_money: Mapped[Optional[int]] = mapped_column(Integer)  # 賞金 (万円)
+    winner_or_second: Mapped[Optional[str]] = mapped_column(String(50))  # 勝ち馬(2着馬)
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False

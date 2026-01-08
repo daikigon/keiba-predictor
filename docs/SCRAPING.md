@@ -24,7 +24,16 @@
 
 ### 2.4 馬詳細
 - **URL**: `https://db.netkeiba.com/horse/XXXXXXXXXX/`
-- **取得情報**: 血統、過去成績等
+- **取得情報**: 基本情報（馬名、性別、生年等）
+
+### 2.4.1 馬の過去成績 (2025年8月以降の新URL)
+- **URL**: `https://db.netkeiba.com/horse/result/XXXXXXXXXX`
+- **取得情報**: 過去のレース成績（着順、タイム、上がり3F等）
+- **注意**: 2025年8月にnetkeibaの仕様変更があり、過去成績は別URLから取得が必要
+
+### 2.4.2 馬の血統情報
+- **URL**: `https://db.netkeiba.com/horse/ped/XXXXXXXXXX/`
+- **取得情報**: 血統情報（父、母、母父等）
 
 ### 2.5 騎手詳細
 - **URL**: `https://db.netkeiba.com/jockey/XXXXX/`
@@ -214,3 +223,38 @@ class OddsScraper(BaseScraper):
 3. **負荷**: 大量リクエストは深夜帯に実行
 4. **個人利用**: 取得データは個人利用に限る
 5. **キャッシュ**: 同一ページは再取得しない
+
+---
+
+## 9. netkeiba 仕様変更履歴
+
+### 2025年8月 URL構造変更
+netkeibaのページ構造が変更され、馬の詳細ページから直接過去成績テーブルを取得できなくなりました。
+
+**変更前:**
+- `https://db.netkeiba.com/horse/{horse_id}` から全情報を取得
+
+**変更後:**
+- 基本情報: `https://db.netkeiba.com/horse/{horse_id}`
+- 過去成績: `https://db.netkeiba.com/horse/result/{horse_id}` (新URL)
+- 血統情報: `https://db.netkeiba.com/horse/ped/{horse_id}/`
+
+本システムは2025年8月以降の新URL構造に対応しています。
+
+---
+
+## 10. 一括補完機能
+
+### 10.1 個別馬データ補完
+- **エンドポイント**: `POST /api/v1/horses/{horse_id}/rescrape`
+- **機能**: 指定した馬の過去成績を再取得し、存在しないRace/Entry/Jockeyレコードを新規作成
+
+### 10.2 全馬一括補完
+- **エンドポイント**: `POST /api/v1/horses/bulk-rescrape`
+- **進捗確認**: `GET /api/v1/horses/bulk-rescrape/status`
+- **機能**: DB登録済みの全馬について過去成績を一括補完
+- **特徴**:
+  - バックグラウンド処理でUIをブロックしない
+  - プログレスバーで進捗表示
+  - 10馬ごとにコミットしてメモリ効率化
+  - 失敗した馬のリストを結果に含む

@@ -157,3 +157,84 @@ keiba-predictor/
 - スクレイピング対象
 - リクエスト間隔: 最低1秒以上
 - User-Agent設定必須
+
+---
+
+## 5. 接続モード
+
+フロントエンドは2つの接続モードをサポートしています。
+
+### 5.1 ローカルバックエンドモード（開発環境）
+
+```
+[Frontend] ---> [FastAPI Backend] ---> [Local PostgreSQL]
+```
+
+**設定方法:** `frontend/.env.local`
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+```
+
+**特徴:**
+- FastAPIバックエンドを経由して全機能が利用可能
+- スクレイピング、一括補完など書き込み系機能が利用可能
+- ローカルPostgreSQLにデータが保存される
+
+### 5.2 Supabase直接接続モード（本番環境）
+
+```
+[Frontend] ---> [Supabase (PostgreSQL)]
+```
+
+**設定方法:** `frontend/.env.local`
+```env
+NEXT_PUBLIC_API_URL=
+NEXT_PUBLIC_SUPABASE_URL=https://xxxxx.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+```
+
+**特徴:**
+- Vercelなど本番環境向け
+- 読み取り専用（スクレイピング機能は利用不可）
+- Supabaseに直接接続してデータを表示
+
+### 5.3 モード判定ロジック
+
+```typescript
+// frontend/src/lib/api.ts
+const useSupabase = !API_BASE_URL && isSupabaseConfigured;
+```
+
+- `API_BASE_URL`が設定されている場合: ローカルバックエンドモード
+- `API_BASE_URL`が空かつSupabase設定がある場合: Supabase直接接続モード
+
+### 5.4 データ管理ページの表示
+
+データ管理ページ（`/data`）は実際にバックエンドへヘルスチェックを行い、動的に状態を表示します。
+
+| バックエンド状態 | 表示 | スクレイピング |
+|----------------|------|--------------|
+| 稼働中 | 緑色「ローカルバックエンド接続中」 | 利用可能 |
+| 停止中/未設定 | 黄色「Supabase直接接続モード」 | 利用不可 |
+
+---
+
+## 6. Supabase Storage
+
+機械学習モデルファイル（.pkl）の保存にSupabase Storageを使用。
+
+### 6.1 設定
+
+```env
+SUPABASE_URL=https://xxxxx.supabase.co
+SUPABASE_KEY=your_service_key
+SUPABASE_MODEL_BUCKET=models
+```
+
+### 6.2 機能
+
+- モデルのアップロード・ダウンロード
+- バージョン管理
+- 署名付きURL生成（一時的なダウンロードリンク）
+
+**注意:** データベース同期機能は未実装。ローカルDBとSupabaseのデータは別々に管理されます。

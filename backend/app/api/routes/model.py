@@ -2,13 +2,17 @@
 モデル管理API
 
 再学習・モデル切り替え・バージョン管理・シミュレーションエンドポイント
+SSEストリーミング対応
 """
+import asyncio
+import json
 from datetime import datetime
 from itertools import combinations
 from typing import Optional
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -128,6 +132,74 @@ async def get_retraining_status():
         "status": "success",
         "retraining_status": status,
     }
+
+
+@router.get("/status/stream")
+async def stream_retraining_status():
+    """
+    再学習の進捗をSSEでストリーミング
+
+    リアルタイムで学習の進捗状況を受け取れます。
+    学習完了またはエラー時に接続が終了します。
+
+    ## 使用例（JavaScript）
+    ```javascript
+    const eventSource = new EventSource('/api/v1/model/status/stream');
+    eventSource.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log(data.message, data.progress_percent + '%');
+    };
+    ```
+    """
+    async def event_generator():
+        # リスナーを登録
+        progress_queue = retraining_service.register_progress_listener()
+
+        try:
+            # 初期状態を送信
+            status = retraining_service.get_retraining_status()
+            yield f"data: {json.dumps({'type': 'connected', 'is_running': status['is_running']})}\n\n"
+
+            # イベントを待機してストリーミング
+            while True:
+                try:
+                    # 非同期でキューからイベントを取得（1秒タイムアウト）
+                    event = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: progress_queue.get(timeout=1.0)
+                    )
+
+                    # イベントをSSE形式で送信
+                    yield f"data: {json.dumps(event)}\n\n"
+
+                    # 完了またはエラーの場合は終了
+                    if event.get("type") in ("complete", "error"):
+                        break
+
+                except Exception:
+                    # タイムアウト時はハートビートを送信
+                    status = retraining_service.get_retraining_status()
+                    if not status["is_running"]:
+                        # 学習が終了している場合は接続終了
+                        yield f"data: {json.dumps({'type': 'idle', 'message': '学習は実行されていません'})}\n\n"
+                        break
+                    else:
+                        # ハートビート
+                        yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+
+        finally:
+            # リスナーを解除
+            retraining_service.unregister_progress_listener(progress_queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 @router.get("/versions")
@@ -542,3 +614,258 @@ async def run_simulation_sync(
         "status": "success",
         "results": _simulation_status["results"],
     }
+
+
+# ================== クラウドストレージ関連 ==================
+
+from app.services import storage_service
+
+
+@router.get("/storage/status")
+async def get_storage_status():
+    """
+    Supabase Storage の接続状態を確認
+    """
+    available = storage_service.is_storage_available()
+    return {
+        "status": "success",
+        "storage_available": available,
+        "bucket": settings.SUPABASE_MODEL_BUCKET if available else None,
+    }
+
+
+@router.get("/storage/models")
+async def list_cloud_models():
+    """
+    クラウド（Supabase Storage）に保存されているモデル一覧を取得
+    """
+    if not storage_service.is_storage_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase Storage is not configured or unavailable"
+        )
+
+    models = storage_service.list_models()
+    return {
+        "status": "success",
+        "count": len(models),
+        "models": models,
+    }
+
+
+class UploadModelParams(BaseModel):
+    """モデルアップロードパラメータ"""
+    version: str = "v1"
+    description: Optional[str] = None
+
+
+@router.post("/storage/upload")
+async def upload_model_to_cloud(params: UploadModelParams):
+    """
+    ローカルの学習済みモデルをクラウド（Supabase Storage）にアップロード
+
+    現在ロードされているモデルをSupabase Storageにアップロードします。
+    Colabなど他の環境から利用できるようになります。
+    """
+    if not storage_service.is_storage_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase Storage is not configured or unavailable"
+        )
+
+    # 現在のモデルを取得
+    predictor = prediction_service.get_predictor()
+    if predictor.model is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No model is currently loaded. Train or load a model first."
+        )
+
+    try:
+        # モデルデータを準備
+        model_data = {
+            "model": predictor.model,
+            "scaler": predictor.scaler,
+            "calibrator": predictor.calibrator,
+            "feature_columns": predictor.feature_columns,
+            "model_version": params.version,
+        }
+
+        # メタデータ
+        metadata = {
+            "version": params.version,
+            "description": params.description,
+            "num_features": len(predictor.feature_columns),
+            "best_iteration": predictor.model.best_iteration if predictor.model else None,
+            "uploaded_from": "fastapi_local",
+        }
+
+        # アップロード
+        result = storage_service.upload_model(model_data, params.version, metadata)
+
+        logger.info(f"Model uploaded to cloud: {params.version}")
+
+        return {
+            "status": "success",
+            "message": f"Model {params.version} uploaded to cloud storage",
+            **result,
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to upload model: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to upload model: {str(e)}"
+        )
+
+
+class DownloadModelParams(BaseModel):
+    """モデルダウンロードパラメータ"""
+    version: str = "v1"
+    set_as_current: bool = True
+
+
+@router.post("/storage/download")
+async def download_model_from_cloud(params: DownloadModelParams):
+    """
+    クラウド（Supabase Storage）からモデルをダウンロード
+
+    Supabase Storageからモデルをダウンロードし、ローカルに保存します。
+    set_as_current=true の場合、現在のモデルとしてロードします。
+    """
+    if not storage_service.is_storage_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase Storage is not configured or unavailable"
+        )
+
+    try:
+        # ダウンロード
+        model_data = storage_service.download_model(params.version)
+
+        if model_data is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Model version '{params.version}' not found in cloud storage"
+            )
+
+        # ローカルに保存
+        from app.services.predictor import HorseRacingPredictor
+        from app.services.predictor.model import MODEL_DIR
+
+        MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        local_path = MODEL_DIR / f"model_{params.version}.pkl"
+
+        import pickle
+        with open(local_path, "wb") as f:
+            pickle.dump(model_data, f)
+
+        logger.info(f"Model downloaded from cloud: {params.version} -> {local_path}")
+
+        # 現在のモデルとして設定
+        if params.set_as_current:
+            new_predictor = HorseRacingPredictor(model_version=params.version)
+            new_predictor.load()
+            prediction_service._predictor = new_predictor
+            prediction_service.MODEL_VERSION = params.version
+            logger.info(f"Model set as current: {params.version}")
+
+        return {
+            "status": "success",
+            "message": f"Model {params.version} downloaded from cloud storage",
+            "version": params.version,
+            "local_path": str(local_path),
+            "set_as_current": params.set_as_current,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to download model: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to download model: {str(e)}"
+        )
+
+
+class RetrainAndUploadParams(BaseModel):
+    """再学習＆アップロードパラメータ"""
+    version: str = "v1"
+    description: Optional[str] = None
+    num_boost_round: int = 1000
+    early_stopping: int = 50
+    use_time_split: bool = False
+    train_end_date: Optional[str] = None
+    valid_end_date: Optional[str] = None
+
+
+@router.post("/retrain-and-upload")
+async def retrain_and_upload(params: RetrainAndUploadParams):
+    """
+    モデルを再学習してクラウドにアップロード（ハイブリッド構成用）
+
+    ローカルで重い学習処理を行い、完了後に自動的にSupabase Storageに
+    アップロードします。Colabからは推論のみ行えるようになります。
+
+    ## フロー
+    1. ローカルでモデル学習（重い処理）
+    2. 学習完了後、Supabase Storageにアップロード
+    3. Colabから最新モデルをダウンロードして推論実行
+
+    ## 注意
+    - 学習には時間がかかります（数分〜数十分）
+    - 進捗は GET /api/v1/model/status で確認できます
+    """
+    if not storage_service.is_storage_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase Storage is not configured. Set SUPABASE_URL and SUPABASE_KEY."
+        )
+
+    def parse_date(date_str: Optional[str]):
+        if not date_str:
+            return None
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid date format: {date_str}")
+
+    parsed_train_end = parse_date(params.train_end_date)
+    parsed_valid_end = parse_date(params.valid_end_date)
+
+    if params.use_time_split and (not parsed_train_end or not parsed_valid_end):
+        raise HTTPException(
+            status_code=400,
+            detail="Time-split mode requires train_end_date and valid_end_date"
+        )
+
+    # 再学習を開始
+    result = retraining_service.start_retraining(
+        min_date=None,
+        num_boost_round=params.num_boost_round,
+        early_stopping=params.early_stopping,
+        valid_fraction=0.2,
+        use_time_split=params.use_time_split,
+        train_end_date=parsed_train_end,
+        valid_end_date=parsed_valid_end,
+        # アップロード用の追加パラメータ
+        upload_after_training=True,
+        upload_version=params.version,
+        upload_description=params.description,
+    )
+
+    if result["status"] == "already_running":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Retraining is already running since {result['started_at']}"
+        )
+
+    return {
+        "status": "success",
+        "message": f"Retraining started. Model will be uploaded as version '{params.version}' after completion.",
+        "started_at": result["started_at"],
+        "upload_version": params.version,
+    }
+
+
+from app.config import settings

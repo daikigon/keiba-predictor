@@ -2,11 +2,14 @@
 モデル再学習サービス
 
 APIから呼び出し可能な再学習機能を提供
+SSEストリーミング対応
 """
 from datetime import datetime, date
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import threading
+import queue
+import json
 
 from sqlalchemy.orm import Session
 
@@ -25,6 +28,40 @@ _retraining_status = {
     "last_result": None,
 }
 _lock = threading.Lock()
+
+# SSE用の進捗イベントキュー（複数クライアント対応）
+_progress_queues: List[queue.Queue] = []
+_queues_lock = threading.Lock()
+
+
+def register_progress_listener() -> queue.Queue:
+    """進捗リスナーを登録"""
+    q = queue.Queue()
+    with _queues_lock:
+        _progress_queues.append(q)
+    return q
+
+
+def unregister_progress_listener(q: queue.Queue):
+    """進捗リスナーを解除"""
+    with _queues_lock:
+        if q in _progress_queues:
+            _progress_queues.remove(q)
+
+
+def emit_progress(event_type: str, data: Dict[str, Any]):
+    """進捗イベントを発行"""
+    event = {
+        "type": event_type,
+        "timestamp": datetime.now().isoformat(),
+        **data,
+    }
+    with _queues_lock:
+        for q in _progress_queues:
+            try:
+                q.put_nowait(event)
+            except queue.Full:
+                pass  # キューがいっぱいの場合はスキップ
 
 
 class RetrainingResult:
@@ -85,6 +122,10 @@ def start_retraining(
     use_time_split: bool = False,
     train_end_date: Optional[date] = None,
     valid_end_date: Optional[date] = None,
+    # クラウドアップロード用パラメータ
+    upload_after_training: bool = False,
+    upload_version: Optional[str] = None,
+    upload_description: Optional[str] = None,
 ) -> dict:
     """
     再学習を開始する
@@ -97,6 +138,9 @@ def start_retraining(
         use_time_split: 時系列分割モードを使用するか
         train_end_date: 学習データの終了日（時系列分割モード）
         valid_end_date: 検証データの終了日（時系列分割モード）
+        upload_after_training: 学習完了後にクラウドにアップロードするか
+        upload_version: アップロード時のバージョン名
+        upload_description: アップロード時の説明
 
     Returns:
         開始状態
@@ -116,7 +160,8 @@ def start_retraining(
     thread = threading.Thread(
         target=_run_retraining,
         args=(min_date, num_boost_round, early_stopping, valid_fraction,
-              use_time_split, train_end_date, valid_end_date),
+              use_time_split, train_end_date, valid_end_date,
+              upload_after_training, upload_version, upload_description),
         daemon=True,
     )
     thread.start()
@@ -135,6 +180,9 @@ def _run_retraining(
     use_time_split: bool = False,
     train_end_date: Optional[date] = None,
     valid_end_date: Optional[date] = None,
+    upload_after_training: bool = False,
+    upload_version: Optional[str] = None,
+    upload_description: Optional[str] = None,
 ) -> None:
     """バックグラウンドで再学習を実行"""
     result = RetrainingResult()
@@ -143,20 +191,34 @@ def _run_retraining(
     db = SessionLocal()
 
     try:
+        # ステップ1: データ準備開始
         with _lock:
             _retraining_status["progress"] = "preparing_data"
+        emit_progress("step", {
+            "step": "preparing_data",
+            "message": "学習データを準備中...",
+            "progress_percent": 5,
+        })
 
         logger.info("Starting model retraining...")
 
         # 日付ベースのバージョンを生成
-        version = datetime.now().strftime("v%Y%m%d_%H%M%S")
+        version = upload_version or datetime.now().strftime("v%Y%m%d_%H%M%S")
         result.model_version = version
+
+        emit_progress("info", {
+            "message": f"モデルバージョン: {version}",
+        })
 
         predictor = HorseRacingPredictor(model_version=version)
 
         if use_time_split and train_end_date and valid_end_date:
             # 時系列分割モード
             logger.info(f"Using time-split mode: train_end={train_end_date}, valid_end={valid_end_date}")
+            emit_progress("info", {
+                "message": f"時系列分割モード: 学習〜{train_end_date}, 検証〜{valid_end_date}",
+            })
+
             data = prepare_time_split_data(
                 db,
                 train_end_date=train_end_date,
@@ -174,10 +236,27 @@ def _run_retraining(
 
             result.num_samples = len(X_train) + len(X_valid)
             result.num_features = len(X_train.columns)
+
+            emit_progress("step", {
+                "step": "data_ready",
+                "message": f"データ準備完了: 学習{len(X_train)}件, 検証{len(X_valid)}件",
+                "progress_percent": 15,
+                "num_train_samples": len(X_train),
+                "num_valid_samples": len(X_valid),
+                "num_features": result.num_features,
+            })
+
             logger.info(f"Train: {len(X_train)} samples, Valid: {len(X_valid)} samples, Test: {data['counts']['test']} samples")
 
             with _lock:
                 _retraining_status["progress"] = "training"
+
+            # ステップ2: 学習開始
+            emit_progress("step", {
+                "step": "training",
+                "message": "モデルを学習中...",
+                "progress_percent": 20,
+            })
 
             # 時系列分割モードで学習
             logger.info("Training model with time-split data...")
@@ -192,6 +271,10 @@ def _run_retraining(
         else:
             # 従来モード
             logger.info("Using legacy mode (fraction-based split)")
+            emit_progress("info", {
+                "message": "従来モード（ランダム分割）",
+            })
+
             X, y = prepare_training_data(db, min_date=min_date)
 
             if X.empty:
@@ -199,10 +282,26 @@ def _run_retraining(
 
             result.num_samples = len(X)
             result.num_features = len(X.columns)
+
+            emit_progress("step", {
+                "step": "data_ready",
+                "message": f"データ準備完了: {result.num_samples}件, {result.num_features}特徴量",
+                "progress_percent": 15,
+                "num_samples": result.num_samples,
+                "num_features": result.num_features,
+            })
+
             logger.info(f"Training data: {result.num_samples} samples, {result.num_features} features")
 
             with _lock:
                 _retraining_status["progress"] = "training"
+
+            # ステップ2: 学習開始
+            emit_progress("step", {
+                "step": "training",
+                "message": "モデルを学習中...",
+                "progress_percent": 20,
+            })
 
             # 従来モードで学習
             logger.info("Training model...")
@@ -216,16 +315,94 @@ def _run_retraining(
 
         result.train_rmse = train_result["train_rmse"]
         result.valid_rmse = train_result["valid_rmse"]
+
+        # ステップ3: 学習完了
+        emit_progress("step", {
+            "step": "training_done",
+            "message": f"学習完了: Train RMSE={result.train_rmse:.4f}, Valid RMSE={result.valid_rmse:.4f}",
+            "progress_percent": 70,
+            "train_rmse": result.train_rmse,
+            "valid_rmse": result.valid_rmse,
+            "best_iteration": train_result.get("best_iteration"),
+        })
+
         logger.info(f"Training completed: train_rmse={result.train_rmse:.4f}, valid_rmse={result.valid_rmse:.4f}")
 
         with _lock:
             _retraining_status["progress"] = "saving"
 
-        # モデル保存
+        # ステップ4: モデル保存
+        emit_progress("step", {
+            "step": "saving",
+            "message": "モデルをローカルに保存中...",
+            "progress_percent": 80,
+        })
+
         logger.info("Saving model...")
         model_path = predictor.save()
         result.model_path = str(model_path)
         logger.info(f"Model saved to {model_path}")
+
+        emit_progress("info", {
+            "message": f"ローカル保存完了: {model_path}",
+        })
+
+        # クラウドへのアップロード
+        if upload_after_training:
+            with _lock:
+                _retraining_status["progress"] = "uploading_to_cloud"
+
+            # ステップ5: クラウドアップロード
+            emit_progress("step", {
+                "step": "uploading",
+                "message": "Supabase Storageにアップロード中...",
+                "progress_percent": 90,
+            })
+
+            logger.info(f"Uploading model to cloud storage: {version}")
+            try:
+                from app.services import storage_service
+
+                if storage_service.is_storage_available():
+                    # モデルデータを準備
+                    model_data = {
+                        "model": predictor.model,
+                        "scaler": predictor.scaler,
+                        "calibrator": predictor.calibrator,
+                        "feature_columns": predictor.feature_columns,
+                        "model_version": version,
+                    }
+
+                    # メタデータ
+                    metadata = {
+                        "version": version,
+                        "description": upload_description,
+                        "num_features": result.num_features,
+                        "num_samples": result.num_samples,
+                        "train_rmse": result.train_rmse,
+                        "valid_rmse": result.valid_rmse,
+                        "best_iteration": predictor.model.best_iteration if predictor.model else None,
+                        "uploaded_from": "fastapi_local",
+                        "trained_at": result.started_at.isoformat() if result.started_at else None,
+                    }
+
+                    upload_result = storage_service.upload_model(model_data, version, metadata)
+                    logger.info(f"Model uploaded to cloud: {upload_result}")
+
+                    emit_progress("info", {
+                        "message": f"クラウドアップロード完了: {version}",
+                    })
+                else:
+                    logger.warning("Supabase Storage is not available, skipping upload")
+                    emit_progress("warning", {
+                        "message": "Supabase Storageが利用不可のためスキップ",
+                    })
+            except Exception as upload_error:
+                logger.error(f"Failed to upload model to cloud: {upload_error}")
+                emit_progress("warning", {
+                    "message": f"アップロード失敗: {upload_error}",
+                })
+                # アップロード失敗は学習成功に影響しない
 
         result.success = True
         result.completed_at = datetime.now()
@@ -233,6 +410,18 @@ def _run_retraining(
         with _lock:
             _retraining_status["progress"] = "completed"
             _retraining_status["last_result"] = result
+
+        # ステップ6: 完了
+        emit_progress("complete", {
+            "step": "completed",
+            "message": "再学習が正常に完了しました",
+            "progress_percent": 100,
+            "version": version,
+            "train_rmse": result.train_rmse,
+            "valid_rmse": result.valid_rmse,
+            "num_samples": result.num_samples,
+            "num_features": result.num_features,
+        })
 
         logger.info(f"Retraining completed successfully: {version}")
 
@@ -244,6 +433,14 @@ def _run_retraining(
         with _lock:
             _retraining_status["progress"] = "failed"
             _retraining_status["last_result"] = result
+
+        # エラーイベントを発行
+        emit_progress("error", {
+            "step": "failed",
+            "message": f"再学習に失敗しました: {e}",
+            "progress_percent": 0,
+            "error": str(e),
+        })
 
     finally:
         db.close()

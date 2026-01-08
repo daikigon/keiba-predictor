@@ -169,3 +169,72 @@ CREATE INDEX idx_predictions_created_at ON predictions(created_at);
 | ORM | SQLAlchemy |
 | マイグレーション | Alembic |
 | DB確認・管理 | DBeaver |
+
+---
+
+## 5. データベース環境
+
+### 5.1 ローカル開発環境
+
+```
+PostgreSQL (localhost:5432)
+└── keiba_db
+```
+
+**設定:** `backend/.env`
+```env
+DATABASE_URL=postgresql://postgres:password@localhost:5432/keiba_db
+```
+
+**用途:**
+- 開発・テスト
+- スクレイピングによるデータ取得
+- 一括補完処理
+- モデル学習
+
+### 5.2 本番環境 (Supabase)
+
+```
+Supabase (PostgreSQL)
+├── Database: メインデータ
+└── Storage: モデルファイル (.pkl)
+```
+
+**設定:** `frontend/.env.local`
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://xxxxx.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
+```
+
+**用途:**
+- 本番環境での読み取り
+- Vercelからの直接接続
+
+### 5.3 データ同期
+
+現時点ではローカルDBとSupabaseのデータ同期機能は**未実装**です。
+
+**運用方法:**
+1. ローカル環境でスクレイピング・一括補完を実行
+2. 必要に応じて手動でデータをエクスポート/インポート
+3. 本番環境はSupabaseから読み取り
+
+---
+
+## 6. データ補完時のレコード作成
+
+スクレイピングで取得した過去成績から、存在しないレコードを自動作成します。
+
+### 6.1 作成されるレコード
+
+| 条件 | 作成レコード |
+|------|------------|
+| race_idがracesテーブルに存在しない | 新規Raceレコード |
+| horse_id + race_idの組み合わせがentriesに存在しない | 新規Entryレコード |
+| jockey_idがjockeysテーブルに存在しない | 新規Jockeyレコード（名前空欄） |
+
+### 6.2 注意事項
+
+- 新規作成されたRaceは基本情報のみ（race_id, date, course, distance等）
+- 詳細情報（天候、馬場状態等）は別途レース詳細スクレイピングが必要
+- Jockeyは空の名前で作成後、騎手名更新バッチで補完可能

@@ -19,8 +19,8 @@ import type {
 } from '@/types/prediction';
 
 // 本番環境（Supabase直接接続）かどうか
-// API_BASE_URLが空またはSupabaseが設定されている場合はSupabaseモード
-const useSupabase = !API_BASE_URL || isSupabaseConfigured;
+// API_BASE_URLが空で、かつSupabaseが設定されている場合のみSupabaseモード
+const useSupabase = !API_BASE_URL && isSupabaseConfigured;
 
 class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -257,15 +257,31 @@ export interface HorseDetail extends Horse {
   race_history: Array<{
     race_id: string;
     date: string;
+    venue_detail?: string;
+    weather?: string;
+    race_number?: number;
     race_name: string;
+    num_horses?: number;
     course: string;
     distance: number;
     track_type: string;
+    condition?: string;
+    frame_number?: number;
     horse_number: number;
-    result?: number;
     odds?: number;
     popularity?: number;
+    result?: number;
     jockey_name?: string;
+    weight?: number;
+    finish_time?: string;
+    margin?: string;
+    corner_position?: string;
+    pace?: string;
+    last_3f?: number;
+    horse_weight?: number;
+    weight_diff?: number;
+    prize_money?: number;
+    winner_or_second?: string;
   }>;
 }
 
@@ -289,6 +305,55 @@ export async function getHorses(params?: {
 
 export async function getHorseDetail(horseId: string): Promise<HorseDetail> {
   return fetchApi<HorseDetail>(`/api/v1/horses/${horseId}`);
+}
+
+export interface RescrapeResult {
+  success: boolean;
+  horse_id: string;
+  horse_name: string;
+  scraped_races: number;
+  updated_entries: number;
+  created_entries: number;
+  updated_races: number;
+  created_races: number;
+}
+
+export async function rescrapeHorseData(horseId: string): Promise<RescrapeResult> {
+  return fetchApi<RescrapeResult>(`/api/v1/horses/${horseId}/rescrape`, {
+    method: 'POST',
+  });
+}
+
+// Bulk Rescrape API
+export interface BulkRescrapeStatus {
+  is_running: boolean;
+  progress: number;
+  total: number;
+  current_horse: string | null;
+  results: {
+    processed_horses: number;
+    failed_horses: number;
+    total_scraped_races: number;
+    created_entries: number;
+    updated_entries: number;
+    created_races: number;
+    updated_races: number;
+    failures: Array<{ horse_id: string; name: string; error: string }>;
+  } | null;
+  error: string | null;
+}
+
+export async function startBulkRescrape(): Promise<{ status: string; message: string }> {
+  return fetchApi<{ status: string; message: string }>('/api/v1/horses/bulk-rescrape', {
+    method: 'POST',
+  });
+}
+
+export async function getBulkRescrapeStatus(): Promise<BulkRescrapeStatus> {
+  const response = await fetchApi<{ status: string; bulk_rescrape: BulkRescrapeStatus }>(
+    '/api/v1/horses/bulk-rescrape/status'
+  );
+  return response.bulk_rescrape;
 }
 
 // Jockeys API
