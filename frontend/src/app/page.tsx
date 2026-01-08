@@ -5,7 +5,8 @@ import { RaceList } from '@/components/features/race/RaceList';
 import { ScrapeStatsCard } from '@/components/features/prediction/StatsCard';
 import { getRaces, getScrapeStats, getHistory } from '@/lib/api';
 import { formatDate, formatPercent } from '@/lib/utils';
-import { Calendar, TrendingUp, Target, DollarSign } from 'lucide-react';
+import { Calendar, TrendingUp, Target, DollarSign, Database, Cloud } from 'lucide-react';
+import { API_BASE_URL } from '@/lib/constants';
 
 export const dynamic = 'force-dynamic';
 
@@ -34,11 +35,25 @@ async function getRecentHistory() {
   }
 }
 
+async function checkBackendHealth(): Promise<boolean> {
+  if (!API_BASE_URL) return false;
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/v1/stats/scrape`, {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(3000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 export default async function DashboardPage() {
-  const [racesData, stats, historyData] = await Promise.all([
+  const [racesData, stats, historyData, isBackendAvailable] = await Promise.all([
     getTodayRaces(),
     getStats(),
     getRecentHistory(),
+    checkBackendHealth(),
   ]);
 
   const today = formatDate(new Date().toISOString());
@@ -46,8 +61,30 @@ export default async function DashboardPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">ダッシュボード</h1>
-        <p className="text-gray-500 mt-1">{today}</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900">ダッシュボード</h1>
+            <p className="text-gray-500 mt-1">{today}</p>
+          </div>
+          {/* DB接続状態バッジ */}
+          <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium ${
+            isBackendAvailable
+              ? 'bg-green-100 text-green-800'
+              : 'bg-blue-100 text-blue-800'
+          }`}>
+            {isBackendAvailable ? (
+              <>
+                <Database className="w-4 h-4" />
+                ローカルDB接続中
+              </>
+            ) : (
+              <>
+                <Cloud className="w-4 h-4" />
+                Supabase接続中
+              </>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Stats Overview */}

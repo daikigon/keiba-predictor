@@ -14,7 +14,8 @@ import {
 } from '@/components/ui/Table';
 import { getJockeys, refreshJockeyNames } from '@/lib/api';
 import type { Jockey } from '@/lib/api';
-import { Search, ChevronRight, RefreshCw } from 'lucide-react';
+import { Search, ChevronRight, RefreshCw, Database, Cloud } from 'lucide-react';
+import { API_BASE_URL } from '@/lib/constants';
 
 export default function JockeysPage() {
   const [jockeys, setJockeys] = useState<Jockey[]>([]);
@@ -26,6 +27,28 @@ export default function JockeysPage() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshResult, setRefreshResult] = useState<{ updated: number; errors: number } | null>(null);
   const limit = 50;
+
+  // Backend connection state
+  const [isBackendAvailable, setIsBackendAvailable] = useState<boolean | null>(null);
+
+  // Check backend health
+  useEffect(() => {
+    async function checkBackend() {
+      if (!API_BASE_URL) {
+        setIsBackendAvailable(false);
+        return;
+      }
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/v1/stats/scrape`, {
+          signal: AbortSignal.timeout(3000),
+        });
+        setIsBackendAvailable(res.ok);
+      } catch {
+        setIsBackendAvailable(false);
+      }
+    }
+    checkBackend();
+  }, []);
 
   useEffect(() => {
     async function fetchJockeys() {
@@ -76,7 +99,29 @@ export default function JockeysPage() {
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">騎手管理</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-gray-900">騎手管理</h1>
+          {/* DB接続状態バッジ */}
+          {isBackendAvailable !== null && (
+            <div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${
+              isBackendAvailable
+                ? 'bg-green-100 text-green-800'
+                : 'bg-blue-100 text-blue-800'
+            }`}>
+              {isBackendAvailable ? (
+                <>
+                  <Database className="w-3 h-3" />
+                  ローカルDB
+                </>
+              ) : (
+                <>
+                  <Cloud className="w-3 h-3" />
+                  Supabase
+                </>
+              )}
+            </div>
+          )}
+        </div>
         <p className="text-gray-500 mt-1">登録されている騎手の一覧</p>
       </div>
 
