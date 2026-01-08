@@ -1,4 +1,6 @@
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+// 本番環境（Vercel）では空にしてSupabase直接接続を使用
+// ローカル開発時は.env.localでNEXT_PUBLIC_API_URL=http://localhost:8000を設定
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
 
 export const COURSE_COLORS: Record<string, string> = {
   '東京': 'bg-blue-100 text-blue-800',
