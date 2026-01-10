@@ -17,9 +17,13 @@ logger = get_logger(__name__)
 
 MODEL_VERSION = "v1"
 
-# 期待値ベース推奨のデフォルト閾値
+# 期待値ベース推奨のデフォルト閾値（PDF推奨値に準拠）
 DEFAULT_EV_THRESHOLD = 1.0  # 期待値が1.0以上で推奨
+DEFAULT_MAX_EV = 2.0  # 期待値の上限（高すぎる穴馬を除外）
 DEFAULT_UMAREN_EV_THRESHOLD = 1.2  # 馬連は少し高めの閾値
+DEFAULT_UMAREN_MAX_EV = 5.0  # 馬連の期待値上限
+DEFAULT_MIN_PRED = 0.01  # 最低予測確率（1%未満は除外）
+DEFAULT_UMAREN_TOP_N = 3  # 馬連の組み合わせ対象馬数
 
 # グローバルモデルインスタンス（起動時に一度だけ読み込み）
 _predictor = None
@@ -282,7 +286,11 @@ def _generate_recommended_bets(
     predictions: list[dict],
     umaren_odds: dict = None,
     ev_threshold: float = DEFAULT_EV_THRESHOLD,
+    max_ev: float = DEFAULT_MAX_EV,
     umaren_ev_threshold: float = DEFAULT_UMAREN_EV_THRESHOLD,
+    umaren_max_ev: float = DEFAULT_UMAREN_MAX_EV,
+    min_pred: float = DEFAULT_MIN_PRED,
+    umaren_top_n: int = DEFAULT_UMAREN_TOP_N,
 ) -> list[dict]:
     """
     期待値ベースで推奨買い目を生成
@@ -290,8 +298,12 @@ def _generate_recommended_bets(
     Args:
         predictions: 馬ごとの予測結果
         umaren_odds: 馬連オッズ辞書 {(馬番1, 馬番2): オッズ}
-        ev_threshold: 単勝の期待値閾値
-        umaren_ev_threshold: 馬連の期待値閾値
+        ev_threshold: 単勝の期待値下限（デフォルト: 1.0）
+        max_ev: 単勝の期待値上限（デフォルト: 2.0）- 高すぎる穴馬を除外
+        umaren_ev_threshold: 馬連の期待値下限（デフォルト: 1.2）
+        umaren_max_ev: 馬連の期待値上限（デフォルト: 5.0）
+        min_pred: 最低予測確率（デフォルト: 0.01）
+        umaren_top_n: 馬連の組み合わせ対象馬数（デフォルト: 3）
 
     Returns:
         推奨買い目リスト
@@ -304,8 +316,13 @@ def _generate_recommended_bets(
     # === 単勝の期待値ベース推奨 ===
     tansho_candidates = []
     for pred in predictions:
+        # 最低確率フィルター
+        if pred["probability"] < min_pred:
+            continue
+
         ev = pred.get("tansho_ev", 0)
-        if ev >= ev_threshold:
+        # 期待値の下限・上限チェック
+        if ev >= ev_threshold and ev <= max_ev:
             confidence = "high" if ev >= 1.5 else "medium"
             tansho_candidates.append({
                 "bet_type": "単勝",
@@ -324,8 +341,9 @@ def _generate_recommended_bets(
     # === 馬連の期待値ベース推奨 ===
     umaren_candidates = []
 
-    # 上位5頭の組み合わせを検討
-    top_horses = sorted(predictions, key=lambda x: x["predicted_rank"])[:5]
+    # 最低確率を満たす馬のみ対象にして、上位N頭の組み合わせを検討
+    eligible_horses = [p for p in predictions if p["probability"] >= min_pred]
+    top_horses = sorted(eligible_horses, key=lambda x: x["predicted_rank"])[:umaren_top_n]
 
     for h1, h2 in combinations(top_horses, 2):
         num1, num2 = h1["horse_number"], h2["horse_number"]
@@ -348,7 +366,8 @@ def _generate_recommended_bets(
         # 期待値を計算
         umaren_ev = umaren_prob * odds
 
-        if umaren_ev >= umaren_ev_threshold:
+        # 期待値の下限・上限チェック
+        if umaren_ev >= umaren_ev_threshold and umaren_ev <= umaren_max_ev:
             confidence = "high" if umaren_ev >= 1.8 else "medium"
             umaren_candidates.append({
                 "bet_type": "馬連",

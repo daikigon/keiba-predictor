@@ -13,13 +13,18 @@ import {
   switchModel,
   getFeatureImportance,
   getSimulationStatus,
-  runSimulationSync,
+  startSimulation,
+  startThresholdSweep,
+  getThresholdSweepStatus,
   type CurrentModel,
   type ModelVersion,
   type RetrainingStatus,
   type FeatureImportance,
   type SimulationResult,
   type SimulationStatus,
+  type ThresholdSweepResult,
+  type ThresholdSweepDataPoint,
+  type ThresholdSweepStatus,
 } from '@/lib/api';
 import {
   Cpu,
@@ -34,7 +39,21 @@ import {
   Loader2,
   AlertTriangle,
   Server,
+  LineChart as LineChartIcon,
 } from 'lucide-react';
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+  ReferenceLine,
+  Area,
+  ComposedChart,
+} from 'recharts';
 
 // SSE進捗イベントの型
 type TrainingProgress = {
@@ -42,10 +61,26 @@ type TrainingProgress = {
   step?: string;
   message?: string;
   progress_percent?: number;
-  train_rmse?: number;
-  valid_rmse?: number;
-  num_samples?: number;
+  // データ準備の詳細進捗
+  phase?: string;  // "train" | "valid" | "test"
+  current?: number;
+  total?: number;
+  // 新しい評価指標（二値分類用）
+  train_logloss?: number;
+  valid_logloss?: number;
+  test_logloss?: number;
+  train_auc?: number;
+  valid_auc?: number;
+  test_auc?: number;
+  best_iteration?: number;
+  // サンプル数
+  num_train_samples?: number;
+  num_valid_samples?: number;
+  num_test_samples?: number;
   num_features?: number;
+  // 過学習チェック
+  overfit_gap?: number;
+  generalization_gap?: number;
   version?: string;
   error?: string;
 };
@@ -65,25 +100,64 @@ export default function ModelPage() {
   // SSE進捗状態
   const [trainingProgress, setTrainingProgress] = useState<TrainingProgress | null>(null);
   const [progressLogs, setProgressLogs] = useState<string[]>([]);
+  const [lastProgressPercent, setLastProgressPercent] = useState<number>(0);
 
   // Training parameters
   const [trainParams, setTrainParams] = useState({
     use_time_split: true,
     train_end_date: '',
     valid_end_date: '',
-    num_boost_round: 1000,
+    num_boost_round: 3000,
+    early_stopping: 100,
   });
 
-  // Simulation parameters
-  const [simParams, setSimParams] = useState({
-    ev_threshold: 1.0,
-    umaren_ev_threshold: 1.2,
-    bet_type: 'all' as 'tansho' | 'umaren' | 'all',
-    bet_amount: 100,
-    limit: 200,
-    start_date: '',  // テスト期間開始日
-    end_date: '',    // テスト期間終了日
+  // Simulation parameters (localStorageから復元)
+  const [simParams, setSimParams] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('simParams');
+      if (saved) {
+        try {
+          return JSON.parse(saved);
+        } catch {}
+      }
+    }
+    return {
+      ev_threshold: 1.0,
+      max_ev: 2.0,  // 期待値上限（PDF推奨値）
+      umaren_ev_threshold: 1.2,
+      umaren_max_ev: 5.0,  // 馬連期待値上限（PDF推奨値）
+      bet_type: 'all' as 'tansho' | 'umaren' | 'all',
+      bet_amount: 100,
+      limit: 200,
+      start_date: '',
+      end_date: '',
+      min_probability: 0.01,  // PDF推奨値: 1%
+      umaren_top_n: 3,  // PDF推奨: 組み合わせ爆発防止
+    };
   });
+
+  // simParamsが変更されたらlocalStorageに保存
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('simParams', JSON.stringify(simParams));
+    }
+  }, [simParams]);
+
+  // ページ読み込み時に保存したモデルバージョンを復元
+  const restoreSavedModel = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+
+    const savedVersion = localStorage.getItem('selectedModelVersion');
+    if (savedVersion) {
+      try {
+        const result = await switchModel(savedVersion);
+        setCurrentModel(result.model);
+      } catch {
+        // 保存されたバージョンが無効な場合は無視
+        localStorage.removeItem('selectedModelVersion');
+      }
+    }
+  }, []);
 
   const loadData = useCallback(async () => {
     let failedCount = 0;
@@ -133,7 +207,8 @@ export default function ModelPage() {
 
   useEffect(() => {
     loadData();
-  }, [loadData]);
+    restoreSavedModel();
+  }, [loadData, restoreSavedModel]);
 
   // Poll for status updates during retraining or simulation
   useEffect(() => {
@@ -176,6 +251,7 @@ export default function ModelPage() {
     setError(null);
     setTrainingProgress(null);
     setProgressLogs([]);
+    setLastProgressPercent(0);
 
     try {
       const params = trainParams.use_time_split
@@ -184,9 +260,11 @@ export default function ModelPage() {
             train_end_date: trainParams.train_end_date,
             valid_end_date: trainParams.valid_end_date,
             num_boost_round: trainParams.num_boost_round,
+            early_stopping: trainParams.early_stopping,
           }
         : {
             num_boost_round: trainParams.num_boost_round,
+            early_stopping: trainParams.early_stopping,
           };
 
       // 再学習を開始
@@ -200,6 +278,11 @@ export default function ModelPage() {
         try {
           const data = JSON.parse(event.data) as TrainingProgress;
           setTrainingProgress(data);
+
+          // 進捗パーセントを更新（常に最新値を保持）
+          if (data.progress_percent !== undefined) {
+            setLastProgressPercent(data.progress_percent);
+          }
 
           // ログにメッセージを追加
           if (data.message) {
@@ -235,6 +318,10 @@ export default function ModelPage() {
     try {
       const result = await switchModel(version);
       setCurrentModel(result.model);
+      // 選択したモデルバージョンをlocalStorageに保存
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('selectedModelVersion', version);
+      }
       await loadData();
     } catch (err) {
       setError('モデルの切り替えに失敗しました');
@@ -245,6 +332,14 @@ export default function ModelPage() {
   const handleSimulate = async () => {
     setIsSimulating(true);
     setError(null);
+    setSimulationStatus({
+      is_running: true,
+      progress: 0,
+      total: 0,
+      results: null,
+      error: null,
+    });
+
     try {
       // 空の日付は除外
       const params = {
@@ -252,19 +347,40 @@ export default function ModelPage() {
         start_date: simParams.start_date || undefined,
         end_date: simParams.end_date || undefined,
       };
-      const results = await runSimulationSync(params);
+
+      // 非同期シミュレーション開始
+      await startSimulation(params);
+
+      // ポーリングで進捗を監視
+      const pollInterval = setInterval(async () => {
+        try {
+          const status = await getSimulationStatus();
+          setSimulationStatus(status);
+
+          // 完了したらポーリング停止
+          if (!status.is_running) {
+            clearInterval(pollInterval);
+            setIsSimulating(false);
+            if (status.error) {
+              setError(status.error);
+            }
+          }
+        } catch (pollErr) {
+          console.error('Failed to poll simulation status:', pollErr);
+        }
+      }, 500); // 0.5秒ごとにポーリング
+
+    } catch (err) {
+      setError('シミュレーションの開始に失敗しました');
+      console.error(err);
+      setIsSimulating(false);
       setSimulationStatus({
         is_running: false,
         progress: 0,
         total: 0,
-        results,
+        results: null,
         error: null,
       });
-    } catch (err) {
-      setError('シミュレーションに失敗しました');
-      console.error(err);
-    } finally {
-      setIsSimulating(false);
     }
   };
 
@@ -434,33 +550,56 @@ export default function ModelPage() {
                     </span>
                   </div>
 
-                  {/* 進捗バー */}
-                  {trainingProgress?.progress_percent !== undefined && (
-                    <div className="space-y-1">
-                      <div className="flex justify-between text-xs text-gray-600">
-                        <span>{trainingProgress.step || 'processing'}</span>
-                        <span>{trainingProgress.progress_percent}%</span>
-                      </div>
-                      <div className="w-full bg-blue-200 rounded-full h-2">
-                        <div
-                          className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                          style={{ width: `${trainingProgress.progress_percent}%` }}
-                        />
-                      </div>
+                  {/* 進捗バー（常に表示） */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs text-gray-600">
+                      <span>
+                        {trainingProgress?.step === 'preparing_data' && trainingProgress.phase
+                          ? `データ準備中 (${trainingProgress.phase === 'train' ? '学習' : trainingProgress.phase === 'valid' ? '検証' : 'テスト'}データ)`
+                          : trainingProgress?.step || '処理中...'}
+                      </span>
+                      <span>{lastProgressPercent}%</span>
                     </div>
-                  )}
+                    <div className="w-full bg-blue-200 rounded-full h-2">
+                      <div
+                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                        style={{ width: `${lastProgressPercent}%` }}
+                      />
+                    </div>
+                    {/* データ準備中の詳細進捗 */}
+                    {trainingProgress?.step === 'preparing_data' && trainingProgress.total && (
+                      <div className="text-xs text-gray-500 mt-1">
+                        {trainingProgress.current} / {trainingProgress.total} レース処理中
+                      </div>
+                    )}
+                  </div>
 
                   {/* 学習メトリクス */}
-                  {trainingProgress?.train_rmse && (
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div className="bg-white p-2 rounded">
-                        <span className="text-gray-500">Train RMSE:</span>
-                        <span className="ml-1 font-medium">{trainingProgress.train_rmse.toFixed(4)}</span>
-                      </div>
-                      {trainingProgress.valid_rmse && (
+                  {trainingProgress?.train_auc && (
+                    <div className="space-y-2 text-xs">
+                      <div className="grid grid-cols-3 gap-2">
                         <div className="bg-white p-2 rounded">
-                          <span className="text-gray-500">Valid RMSE:</span>
-                          <span className="ml-1 font-medium">{trainingProgress.valid_rmse.toFixed(4)}</span>
+                          <span className="text-gray-500">Train AUC:</span>
+                          <span className="ml-1 font-medium">{trainingProgress.train_auc.toFixed(4)}</span>
+                        </div>
+                        <div className="bg-white p-2 rounded">
+                          <span className="text-gray-500">Valid AUC:</span>
+                          <span className="ml-1 font-medium">{trainingProgress.valid_auc?.toFixed(4) || '-'}</span>
+                        </div>
+                        {trainingProgress.test_auc && (
+                          <div className="bg-white p-2 rounded">
+                            <span className="text-gray-500">Test AUC:</span>
+                            <span className="ml-1 font-medium">{trainingProgress.test_auc.toFixed(4)}</span>
+                          </div>
+                        )}
+                      </div>
+                      {trainingProgress.overfit_gap !== undefined && (
+                        <div className={`bg-white p-2 rounded ${trainingProgress.overfit_gap > 0.1 ? 'border border-yellow-400' : ''}`}>
+                          <span className="text-gray-500">過学習チェック:</span>
+                          <span className={`ml-1 font-medium ${trainingProgress.overfit_gap > 0.1 ? 'text-yellow-600' : 'text-green-600'}`}>
+                            Gap={trainingProgress.overfit_gap.toFixed(4)}
+                            {trainingProgress.overfit_gap > 0.1 ? ' ⚠️' : ' ✓'}
+                          </span>
                         </div>
                       )}
                     </div>
@@ -475,15 +614,23 @@ export default function ModelPage() {
                     </div>
                   )}
                 </div>
-              ) : retrainingStatus?.result ? (
+              ) : retrainingStatus?.last_result ? (
                 <div className="space-y-2 p-3 bg-green-50 rounded-lg">
                   <div className="flex items-center gap-2 text-green-600">
                     <CheckCircle className="w-4 h-4" />
-                    <span>最後の再学習: 成功</span>
+                    <span>最後の再学習: {retrainingStatus.last_result.success ? '成功' : '失敗'}</span>
                   </div>
-                  <div className="text-sm text-gray-500">
-                    <p>バージョン: {retrainingStatus.result.version}</p>
-                    <p>検証スコア: {retrainingStatus.result.valid_score?.toFixed(4)}</p>
+                  <div className="text-sm text-gray-500 space-y-1">
+                    <p>バージョン: {retrainingStatus.last_result.model_version}</p>
+                    {retrainingStatus.last_result.valid_auc && (
+                      <p>Valid AUC: {retrainingStatus.last_result.valid_auc.toFixed(4)}</p>
+                    )}
+                    {retrainingStatus.last_result.test_auc && (
+                      <p>Test AUC: {retrainingStatus.last_result.test_auc.toFixed(4)}</p>
+                    )}
+                    {retrainingStatus.last_result.best_iteration && (
+                      <p>Best Iteration: {retrainingStatus.last_result.best_iteration}</p>
+                    )}
                   </div>
                 </div>
               ) : retrainingStatus?.error ? (
@@ -619,7 +766,7 @@ export default function ModelPage() {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm text-gray-600 mb-1">
-                    単勝EV閾値
+                    単勝EV下限
                   </label>
                   <input
                     type="number"
@@ -634,7 +781,22 @@ export default function ModelPage() {
                 </div>
                 <div>
                   <label className="block text-sm text-gray-600 mb-1">
-                    馬連EV閾値
+                    単勝EV上限
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={simParams.max_ev}
+                    onChange={(e) =>
+                      setSimParams({ ...simParams, max_ev: parseFloat(e.target.value) })
+                    }
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">
+                    馬連EV下限
                   </label>
                   <input
                     type="number"
@@ -645,6 +807,62 @@ export default function ModelPage() {
                       setSimParams({
                         ...simParams,
                         umaren_ev_threshold: parseFloat(e.target.value),
+                      })
+                    }
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">
+                    馬連EV上限
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    value={simParams.umaren_max_ev}
+                    onChange={(e) =>
+                      setSimParams({
+                        ...simParams,
+                        umaren_max_ev: parseFloat(e.target.value),
+                      })
+                    }
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">
+                    最低確率 (%)
+                  </label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="0"
+                    max="100"
+                    value={Math.round(simParams.min_probability * 100)}
+                    onChange={(e) =>
+                      setSimParams({
+                        ...simParams,
+                        min_probability: parseFloat(e.target.value) / 100,
+                      })
+                    }
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">
+                    馬連対象馬数
+                  </label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="2"
+                    max="10"
+                    value={simParams.umaren_top_n}
+                    onChange={(e) =>
+                      setSimParams({
+                        ...simParams,
+                        umaren_top_n: parseInt(e.target.value),
                       })
                     }
                     className="w-full px-3 py-2 border rounded-lg text-sm"
@@ -791,7 +1009,361 @@ export default function ModelPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Threshold Sweep Analysis Section */}
+      <ThresholdSweepSection backendAvailable={backendAvailable} />
     </div>
+  );
+}
+
+function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean }) {
+  const [sweepStatus, setSweepStatus] = useState<ThresholdSweepStatus | null>(null);
+  const [sweepResult, setSweepResult] = useState<ThresholdSweepResult | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sweepParams, setSweepParams] = useState({
+    bet_type: 'tansho' as 'tansho' | 'umaren',
+    ev_min: 0.8,
+    ev_max: 2.0,
+    ev_step: 0.05,
+    limit: 500,
+    start_date: '',
+    end_date: '',
+  });
+
+  const handleRunSweep = async () => {
+    setIsLoading(true);
+    setError(null);
+    setSweepResult(null);
+    setSweepStatus(null);
+
+    try {
+      const params = {
+        ...sweepParams,
+        start_date: sweepParams.start_date || undefined,
+        end_date: sweepParams.end_date || undefined,
+      };
+      await startThresholdSweep(params);
+
+      // ポーリングで進捗を監視
+      const pollInterval = setInterval(async () => {
+        try {
+          const status = await getThresholdSweepStatus();
+          setSweepStatus(status);
+
+          if (!status.is_running) {
+            clearInterval(pollInterval);
+            setIsLoading(false);
+
+            if (status.error) {
+              setError(status.error);
+            } else if (status.results) {
+              setSweepResult(status.results);
+            }
+          }
+        } catch (pollErr) {
+          console.error('Failed to poll sweep status:', pollErr);
+        }
+      }, 300);
+
+    } catch (err) {
+      setError('閾値スイープ分析の開始に失敗しました');
+      console.error(err);
+      setIsLoading(false);
+    }
+  };
+
+  // グラフ用にデータを変換（回収率をパーセント表示）
+  const chartData = sweepResult?.data.map((d) => ({
+    ...d,
+    return_rate_pct: d.return_rate * 100,
+  })) || [];
+
+  return (
+    <Card className={cn("mt-6", !backendAvailable && "opacity-60 pointer-events-none")}>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <LineChartIcon className="w-5 h-5 text-purple-600" />
+          <CardTitle>閾値スイープ分析</CardTitle>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-6">
+          {/* パラメータ設定 */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">賭け種別</label>
+              <select
+                value={sweepParams.bet_type}
+                onChange={(e) =>
+                  setSweepParams({ ...sweepParams, bet_type: e.target.value as 'tansho' | 'umaren' })
+                }
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              >
+                <option value="tansho">単勝</option>
+                <option value="umaren">馬連</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">EV最小</label>
+              <input
+                type="number"
+                step="0.1"
+                value={sweepParams.ev_min}
+                onChange={(e) =>
+                  setSweepParams({ ...sweepParams, ev_min: parseFloat(e.target.value) })
+                }
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">EV最大</label>
+              <input
+                type="number"
+                step="0.1"
+                value={sweepParams.ev_max}
+                onChange={(e) =>
+                  setSweepParams({ ...sweepParams, ev_max: parseFloat(e.target.value) })
+                }
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">レース数</label>
+              <input
+                type="number"
+                step="100"
+                value={sweepParams.limit}
+                onChange={(e) =>
+                  setSweepParams({ ...sweepParams, limit: parseInt(e.target.value) })
+                }
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              />
+            </div>
+          </div>
+
+          {/* 期間指定 */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">開始日</label>
+              <input
+                type="date"
+                value={sweepParams.start_date}
+                onChange={(e) =>
+                  setSweepParams({ ...sweepParams, start_date: e.target.value })
+                }
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">終了日</label>
+              <input
+                type="date"
+                value={sweepParams.end_date}
+                onChange={(e) =>
+                  setSweepParams({ ...sweepParams, end_date: e.target.value })
+                }
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              />
+            </div>
+          </div>
+
+          <Button onClick={handleRunSweep} isLoading={isLoading} disabled={isLoading} className="w-full">
+            <Play className="w-4 h-4 mr-2" />
+            分析実行
+          </Button>
+
+          {/* 進捗表示 */}
+          {isLoading && sweepStatus && (
+            <div className="space-y-3 p-4 bg-purple-50 rounded-lg">
+              <div className="flex items-center gap-2 text-purple-600">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>
+                  {sweepStatus.phase === 'preparing' && 'データ準備中...'}
+                  {sweepStatus.phase === 'sweeping' && '閾値スイープ中...'}
+                </span>
+              </div>
+
+              {sweepStatus.phase === 'preparing' && sweepStatus.total > 0 && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-gray-600">
+                    <span>レースデータ準備</span>
+                    <span>{sweepStatus.progress} / {sweepStatus.total}</span>
+                  </div>
+                  <div className="w-full bg-purple-200 rounded-full h-2">
+                    <div
+                      className="bg-purple-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${(sweepStatus.progress / sweepStatus.total) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {sweepStatus.phase === 'sweeping' && sweepStatus.total_thresholds > 0 && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-xs text-gray-600">
+                    <span>閾値分析</span>
+                    <span>{sweepStatus.current_threshold} / {sweepStatus.total_thresholds}</span>
+                  </div>
+                  <div className="w-full bg-purple-200 rounded-full h-2">
+                    <div
+                      className="bg-purple-600 h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${(sweepStatus.current_threshold / sweepStatus.total_thresholds) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+              {error}
+            </div>
+          )}
+
+          {/* グラフ表示 */}
+          {sweepResult && chartData.length > 0 && (
+            <div className="space-y-4">
+              <div className="text-sm text-gray-600">
+                対象: {sweepResult.total_races}レース / {sweepResult.bet_type === 'tansho' ? '単勝' : '馬連'}
+              </div>
+
+              <div className="h-80">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ComposedChart data={chartData} margin={{ top: 20, right: 60, left: 20, bottom: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                    <XAxis
+                      dataKey="ev_threshold"
+                      label={{ value: '期待値閾値', position: 'bottom', offset: 0 }}
+                      tick={{ fontSize: 12 }}
+                    />
+                    <YAxis
+                      yAxisId="left"
+                      domain={[0, 'auto']}
+                      label={{ value: '回収率 (%)', angle: -90, position: 'insideLeft' }}
+                      tick={{ fontSize: 12 }}
+                    />
+                    <YAxis
+                      yAxisId="right"
+                      orientation="right"
+                      domain={['auto', 'auto']}
+                      label={{ value: 'シャープレシオ', angle: 90, position: 'insideRight' }}
+                      tick={{ fontSize: 12 }}
+                    />
+                    <Tooltip
+                      formatter={(value: number, name: string) => {
+                        if (name === '回収率') return `${value.toFixed(1)}%`;
+                        if (name === 'シャープレシオ') return value.toFixed(3);
+                        return value;
+                      }}
+                      labelFormatter={(label) => `EV閾値: ${label}`}
+                    />
+                    <Legend />
+                    <ReferenceLine yAxisId="left" y={100} stroke="#10b981" strokeDasharray="5 5" label="100%" />
+                    <Line
+                      yAxisId="left"
+                      type="monotone"
+                      dataKey="return_rate_pct"
+                      name="回収率"
+                      stroke="#3b82f6"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                    <Line
+                      yAxisId="right"
+                      type="monotone"
+                      dataKey="sharpe_ratio"
+                      name="シャープレシオ"
+                      stroke="#ef4444"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                  </ComposedChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* 最適閾値の表示 */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-3 bg-blue-50 rounded-lg">
+                  <p className="text-xs text-blue-600 mb-1">最高回収率</p>
+                  {(() => {
+                    const best = chartData.reduce((a, b) =>
+                      a.return_rate_pct > b.return_rate_pct ? a : b
+                    );
+                    return (
+                      <div>
+                        <p className="font-semibold text-blue-700">
+                          {best.return_rate_pct.toFixed(1)}% (EV≥{best.ev_threshold})
+                        </p>
+                        <p className="text-xs text-blue-500">
+                          {best.bet_count}点 / 的中{best.hit_count}回
+                        </p>
+                      </div>
+                    );
+                  })()}
+                </div>
+                <div className="p-3 bg-red-50 rounded-lg">
+                  <p className="text-xs text-red-600 mb-1">最高シャープレシオ</p>
+                  {(() => {
+                    const best = chartData.reduce((a, b) =>
+                      a.sharpe_ratio > b.sharpe_ratio ? a : b
+                    );
+                    return (
+                      <div>
+                        <p className="font-semibold text-red-700">
+                          {best.sharpe_ratio.toFixed(3)} (EV≥{best.ev_threshold})
+                        </p>
+                        <p className="text-xs text-red-500">
+                          回収率: {best.return_rate_pct.toFixed(1)}%
+                        </p>
+                      </div>
+                    );
+                  })()}
+                </div>
+              </div>
+
+              {/* 詳細データテーブル */}
+              <details className="mt-4">
+                <summary className="cursor-pointer text-sm text-gray-600 hover:text-gray-800">
+                  詳細データを表示
+                </summary>
+                <div className="mt-2 max-h-64 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-gray-100 sticky top-0">
+                      <tr>
+                        <th className="p-2 text-left">EV閾値</th>
+                        <th className="p-2 text-right">回収率</th>
+                        <th className="p-2 text-right">シャープ</th>
+                        <th className="p-2 text-right">賭数</th>
+                        <th className="p-2 text-right">的中</th>
+                        <th className="p-2 text-right">収支</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {chartData.map((d, i) => (
+                        <tr key={i} className={d.return_rate_pct >= 100 ? 'bg-green-50' : ''}>
+                          <td className="p-2">{d.ev_threshold.toFixed(2)}</td>
+                          <td className={cn('p-2 text-right', d.return_rate_pct >= 100 ? 'text-green-600' : 'text-red-600')}>
+                            {d.return_rate_pct.toFixed(1)}%
+                          </td>
+                          <td className="p-2 text-right">{d.sharpe_ratio.toFixed(3)}</td>
+                          <td className="p-2 text-right">{d.bet_count}</td>
+                          <td className="p-2 text-right">{d.hit_count}</td>
+                          <td className={cn('p-2 text-right', d.profit >= 0 ? 'text-green-600' : 'text-red-600')}>
+                            {d.profit >= 0 ? '+' : ''}{d.profit.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

@@ -52,8 +52,12 @@ def simulate_race(
     race: Race,
     ev_threshold: float = 1.0,
     umaren_ev_threshold: float = 1.2,
+    max_ev: float = 2.0,
+    umaren_max_ev: float = 5.0,
+    min_pred: float = 0.01,
     bet_amount: int = 100,
     bet_type: str = "all",
+    umaren_top_n: int = 3,
 ) -> Optional[dict]:
     """
     1レースのシミュレーションを行う
@@ -63,10 +67,14 @@ def simulate_race(
         predictor: 予測モデル
         extractor: 特徴量抽出器
         race: Raceオブジェクト
-        ev_threshold: 単勝の期待値閾値
-        umaren_ev_threshold: 馬連の期待値閾値
+        ev_threshold: 単勝の期待値下限（デフォルト: 1.0）
+        umaren_ev_threshold: 馬連の期待値下限（デフォルト: 1.2）
+        max_ev: 単勝の期待値上限（デフォルト: 2.0）- 高すぎる穴馬を除外
+        umaren_max_ev: 馬連の期待値上限（デフォルト: 5.0）
+        min_pred: 最低予測確率（デフォルト: 0.01）- 低確率馬を除外
         bet_amount: 1点あたりの賭け金
         bet_type: "tansho", "umaren", or "all"
+        umaren_top_n: 馬連の組み合わせ対象馬数（デフォルト: 3）
 
     Returns:
         シミュレーション結果
@@ -127,9 +135,14 @@ def simulate_race(
             if odds <= 0:
                 continue
 
+            # 最低確率フィルター（低確率馬を除外）
+            if prob < min_pred:
+                continue
+
             ev = prob * odds
 
-            if ev >= ev_threshold:
+            # 期待値の下限・上限チェック
+            if ev >= ev_threshold and ev <= max_ev:
                 actual_rank = actual_results.get(horse_num, 999)
                 is_hit = actual_rank == 1
                 payout = int(odds * bet_amount) if is_hit else 0
@@ -149,10 +162,11 @@ def simulate_race(
 
     # === 馬連シミュレーション ===
     if bet_type in ("umaren", "all"):
-        # 上位5頭の組み合わせを検討
-        top5 = df.nsmallest(5, "pred_rank")
+        # 最低確率を満たす馬のみ対象にして、上位N頭の組み合わせを検討
+        eligible_df = df[df["probability"] >= min_pred]
+        top_n = eligible_df.nsmallest(umaren_top_n, "pred_rank")
 
-        for (_, h1), (_, h2) in combinations(top5.iterrows(), 2):
+        for (_, h1), (_, h2) in combinations(top_n.iterrows(), 2):
             num1, num2 = int(h1["horse_number"]), int(h2["horse_number"])
 
             # 馬連確率
@@ -165,7 +179,8 @@ def simulate_race(
 
             ev = umaren_prob * estimated_odds
 
-            if ev >= umaren_ev_threshold:
+            # 期待値の下限・上限チェック
+            if ev >= umaren_ev_threshold and ev <= umaren_max_ev:
                 # 実際の結果を確認
                 r1 = actual_results.get(num1, 999)
                 r2 = actual_results.get(num2, 999)
@@ -219,6 +234,30 @@ def main():
         help="Expected value threshold for umaren (default: 1.2)",
     )
     parser.add_argument(
+        "--max-ev",
+        type=float,
+        default=2.0,
+        help="Maximum expected value for tansho (default: 2.0) - filters out unlikely high-odds horses",
+    )
+    parser.add_argument(
+        "--umaren-max-ev",
+        type=float,
+        default=5.0,
+        help="Maximum expected value for umaren (default: 5.0)",
+    )
+    parser.add_argument(
+        "--min-pred",
+        type=float,
+        default=0.01,
+        help="Minimum prediction probability (default: 0.01) - filters out low probability horses",
+    )
+    parser.add_argument(
+        "--umaren-top-n",
+        type=int,
+        default=3,
+        help="Number of top horses to consider for umaren combinations (default: 3)",
+    )
+    parser.add_argument(
         "--bet-type",
         type=str,
         choices=["tansho", "umaren", "all"],
@@ -251,8 +290,10 @@ def main():
     print(f"モデルバージョン: {args.version}")
     print(f"期間: {args.start_date or '全期間'} ~ {args.end_date or '現在'}")
     print(f"賭け種別: {args.bet_type}")
-    print(f"単勝EV閾値: {args.ev_threshold}")
-    print(f"馬連EV閾値: {args.umaren_ev_threshold}")
+    print(f"単勝EV閾値: {args.ev_threshold} ~ {args.max_ev}")
+    print(f"馬連EV閾値: {args.umaren_ev_threshold} ~ {args.umaren_max_ev}")
+    print(f"最低確率: {args.min_pred}")
+    print(f"馬連対象馬数: 上位{args.umaren_top_n}頭")
     print(f"1点賭け金: {args.bet_amount}円")
     print("=" * 70)
 
@@ -308,8 +349,12 @@ def main():
                 db, predictor, extractor, race,
                 ev_threshold=args.ev_threshold,
                 umaren_ev_threshold=args.umaren_ev_threshold,
+                max_ev=args.max_ev,
+                umaren_max_ev=args.umaren_max_ev,
+                min_pred=args.min_pred,
                 bet_amount=args.bet_amount,
                 bet_type=args.bet_type,
+                umaren_top_n=args.umaren_top_n,
             )
             if result and result["bets"]:
                 results.append(result)

@@ -450,14 +450,33 @@ export interface CurrentModel {
 
 export interface RetrainingStatus {
   is_running: boolean;
-  progress?: number;
+  progress?: string;
   started_at?: string;
-  completed_at?: string;
   error?: string;
-  result?: {
-    version: string;
-    best_iteration: number;
-    valid_score: number;
+  last_result?: {
+    success: boolean;
+    model_version: string;
+    model_path?: string;
+    // 評価指標
+    train_logloss?: number;
+    valid_logloss?: number;
+    test_logloss?: number;
+    train_auc?: number;
+    valid_auc?: number;
+    test_auc?: number;
+    best_iteration?: number;
+    // サンプル数
+    num_train_samples?: number;
+    num_valid_samples?: number;
+    num_test_samples?: number;
+    num_features?: number;
+    // 過学習チェック
+    overfit_gap?: number;
+    generalization_gap?: number;
+    // その他
+    error?: string;
+    started_at?: string;
+    completed_at?: string;
   };
 }
 
@@ -469,12 +488,16 @@ export interface FeatureImportance {
 
 export interface SimulationParams {
   ev_threshold?: number;
+  max_ev?: number;  // 期待値上限（高すぎる穴馬を除外）
   umaren_ev_threshold?: number;
+  umaren_max_ev?: number;  // 馬連期待値上限
   bet_type?: 'tansho' | 'umaren' | 'all';
   bet_amount?: number;
   limit?: number;
   start_date?: string;  // YYYY-MM-DD形式（テスト期間開始）
   end_date?: string;    // YYYY-MM-DD形式（テスト期間終了）
+  min_probability?: number;  // 最低確率フィルター（0-1）
+  umaren_top_n?: number;  // 馬連の組み合わせ対象馬数
 }
 
 export interface SimulationBetTypeResult {
@@ -598,6 +621,111 @@ export async function runSimulationSync(params: SimulationParams): Promise<Simul
     timeout: 300000, // 5 minutes for sync simulation
   });
   return response.results;
+}
+
+// 閾値スイープ分析
+export interface ThresholdSweepParams {
+  bet_type: 'tansho' | 'umaren';
+  ev_min?: number;
+  ev_max?: number;
+  ev_step?: number;
+  max_ev?: number;
+  min_probability?: number;
+  umaren_top_n?: number;
+  bet_amount?: number;
+  limit?: number;
+  start_date?: string;
+  end_date?: string;
+}
+
+export interface ThresholdSweepDataPoint {
+  ev_threshold: number;
+  return_rate: number;
+  sharpe_ratio: number;
+  bet_count: number;
+  hit_count: number;
+  hit_rate: number;
+  total_bet: number;
+  total_payout: number;
+  profit: number;
+}
+
+export interface ThresholdSweepResult {
+  bet_type: string;
+  total_races: number;
+  data: ThresholdSweepDataPoint[];
+}
+
+export async function startThresholdSweep(params: ThresholdSweepParams): Promise<void> {
+  await fetchApi<{ status: string }>('/api/v1/model/simulate/threshold-sweep', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export interface ThresholdSweepStatus {
+  is_running: boolean;
+  phase: 'idle' | 'preparing' | 'sweeping' | 'complete' | 'error';
+  progress: number;
+  total: number;
+  current_threshold: number;
+  total_thresholds: number;
+  results: ThresholdSweepResult | null;
+  error: string | null;
+}
+
+export async function getThresholdSweepStatus(): Promise<ThresholdSweepStatus> {
+  const response = await fetchApi<{
+    status: string;
+    sweep: ThresholdSweepStatus;
+  }>('/api/v1/model/simulate/threshold-sweep/status');
+  return response.sweep;
+}
+
+export async function runThresholdSweepSync(params: ThresholdSweepParams): Promise<ThresholdSweepResult> {
+  const response = await fetchApi<{
+    status: string;
+    bet_type: string;
+    total_races: number;
+    data: ThresholdSweepDataPoint[];
+  }>('/api/v1/model/simulate/threshold-sweep/sync', {
+    method: 'POST',
+    body: JSON.stringify(params),
+    timeout: 600000, // 10 minutes for sweep
+  });
+  return {
+    bet_type: response.bet_type,
+    total_races: response.total_races,
+    data: response.data,
+  };
+}
+
+// Sync API
+export interface SyncStatus {
+  is_running: boolean;
+  progress: number;
+  total: number;
+  current_table: string | null;
+  results: {
+    horses: { synced: number; errors: number; skipped: number };
+    jockeys: { synced: number; errors: number; skipped: number };
+    races: { synced: number; errors: number; skipped: number };
+    entries: { synced: number; errors: number; skipped: number };
+  } | null;
+  error: string | null;
+  last_sync_at: string | null;
+  pending_retries: number;
+}
+
+export async function startSyncToSupabase(forceFull: boolean = false): Promise<{ status: string; message: string; mode: string }> {
+  const params = forceFull ? '?force_full=true' : '';
+  return fetchApi<{ status: string; message: string; mode: string }>(`/api/v1/sync/to-supabase${params}`, {
+    method: 'POST',
+  });
+}
+
+export async function getSyncStatus(): Promise<SyncStatus> {
+  return fetchApi<SyncStatus>('/api/v1/sync/status');
 }
 
 export { ApiError };

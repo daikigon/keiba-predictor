@@ -38,13 +38,13 @@ _simulation_status = {
 
 class RetrainParams(BaseModel):
     """再学習パラメータ"""
-    num_boost_round: int = 1000
-    early_stopping: int = 50
+    num_boost_round: int = 3000
+    early_stopping: int = 100
     # 従来モード用
     min_date: Optional[str] = None
     valid_fraction: float = 0.2
-    # 時系列分割モード用
-    use_time_split: bool = False
+    # 時系列分割モード用（推奨）
+    use_time_split: bool = True  # デフォルトで時系列分割を使用
     train_end_date: Optional[str] = None
     valid_end_date: Optional[str] = None
 
@@ -338,22 +338,41 @@ class SimulationParams(BaseModel):
     """シミュレーションパラメータ"""
     ev_threshold: float = 1.0
     umaren_ev_threshold: float = 1.2
+    # 期待値上限（高すぎる穴馬を除外）
+    max_ev: float = 2.0  # 単勝の期待値上限
+    umaren_max_ev: float = 5.0  # 馬連の期待値上限
     bet_type: str = "all"  # "tansho", "umaren", or "all"
     bet_amount: int = 100
     limit: int = 200
     # 期間指定（テストデータのみでシミュレーションする場合）
     start_date: Optional[str] = None  # YYYY-MM-DD形式
     end_date: Optional[str] = None  # YYYY-MM-DD形式
+    # 最低確率フィルター（これ以下の確率の馬には賭けない）
+    min_probability: float = 0.01  # デフォルト1%（PDF推奨値）
+    # 馬連の組み合わせ対象馬数
+    umaren_top_n: int = 3  # 上位3頭（PDF推奨: 組み合わせ爆発防止）
 
 
 def _calculate_umaren_prob(probabilities: dict, h1: int, h2: int, n_horses: int) -> float:
-    """馬連の的中確率を計算"""
+    """
+    馬連の的中確率を計算
+
+    より現実的な近似式:
+    - P(馬連) ≈ P(h1が1着)×P(h2が2着|h1が1着) + P(h2が1着)×P(h1が2着|h2が1着)
+    - 近似: P(2着|他馬1着) ≈ P(勝ち) / (1 - P(他馬勝ち))
+    """
     p1 = probabilities.get(h1, 0)
     p2 = probabilities.get(h2, 0)
     if p1 == 0 or p2 == 0:
         return 0.0
-    correction = n_horses / 2 if n_horses > 2 else 1
-    return min((p1 * p2 * correction) * 2, 1.0)
+
+    # h1が1着でh2が2着の確率
+    p1_wins_p2_second = p1 * (p2 / (1 - p1)) if p1 < 1 else 0
+    # h2が1着でh1が2着の確率
+    p2_wins_p1_second = p2 * (p1 / (1 - p2)) if p2 < 1 else 0
+
+    umaren_prob = p1_wins_p2_second + p2_wins_p1_second
+    return min(umaren_prob, 1.0)
 
 
 def _run_simulation(
@@ -368,11 +387,15 @@ def _run_simulation(
         _simulation_status["progress"] = 0
         _simulation_status["error"] = None
 
-        predictor = get_model("v1")
+        # 現在アクティブなモデルを使用
+        predictor = prediction_service.get_predictor()
         if predictor.model is None:
             _simulation_status["error"] = "モデルが読み込まれていません"
             _simulation_status["is_running"] = False
             return
+
+        logger.info(f"Simulation using model version: {predictor.model_version}")
+        logger.info(f"Simulation params: start_date={params.start_date}, end_date={params.end_date}, limit={params.limit}")
 
         # レース取得（期間フィルタ適用）
         stmt = (
@@ -398,6 +421,7 @@ def _run_simulation(
         stmt = stmt.order_by(Race.date.desc()).limit(params.limit)
         races = list(db.execute(stmt).scalars().all())
         _simulation_status["total"] = len(races)
+        logger.info(f"Simulation: Retrieved {len(races)} races (limit={params.limit})")
 
         extractor = FeatureExtractor(db)
         all_results = []
@@ -426,17 +450,14 @@ def _run_simulation(
             if not actual_results or not odds_data:
                 continue
 
-            # 予測
+            # 予測（正規化済み確率を使用）
             try:
-                scores = predictor.predict(df)
+                probabilities_arr = predictor.predict_proba(df)
             except RuntimeError:
                 continue
 
-            # 確率計算
-            exp_scores = np.exp(scores - np.max(scores))
-            probabilities_arr = exp_scores / exp_scores.sum()
             df["probability"] = probabilities_arr
-            df["pred_rank"] = (-scores).argsort().argsort() + 1
+            df["pred_rank"] = (-probabilities_arr).argsort().argsort() + 1
 
             probabilities = dict(zip(df["horse_number"].astype(int), df["probability"]))
 
@@ -450,8 +471,14 @@ def _run_simulation(
                     if odds <= 0:
                         continue
 
+                    # 最低確率フィルター（穴馬を除外）
+                    if prob < params.min_probability:
+                        continue
+
                     ev = prob * odds
-                    if ev >= params.ev_threshold:
+
+                    # 期待値の下限・上限チェック
+                    if ev >= params.ev_threshold and ev <= params.max_ev:
                         actual_rank = actual_results.get(horse_num, 999)
                         is_hit = actual_rank == 1
                         payout = int(odds * params.bet_amount) if is_hit else 0
@@ -468,9 +495,11 @@ def _run_simulation(
 
             # 馬連シミュレーション
             if params.bet_type in ("umaren", "all"):
-                top5 = df.nsmallest(5, "pred_rank")
+                # 最低確率を満たす馬のみ対象、上位N頭に制限
+                eligible_horses = df[df["probability"] >= params.min_probability]
+                top_n = eligible_horses.nsmallest(params.umaren_top_n, "pred_rank")
 
-                for (_, h1), (_, h2) in combinations(top5.iterrows(), 2):
+                for (_, h1), (_, h2) in combinations(top_n.iterrows(), 2):
                     num1, num2 = int(h1["horse_number"]), int(h2["horse_number"])
 
                     umaren_prob = _calculate_umaren_prob(probabilities, num1, num2, len(df))
@@ -481,7 +510,8 @@ def _run_simulation(
 
                     ev = umaren_prob * estimated_odds
 
-                    if ev >= params.umaren_ev_threshold:
+                    # 期待値の下限・上限チェック
+                    if ev >= params.umaren_ev_threshold and ev <= params.umaren_max_ev:
                         r1 = actual_results.get(num1, 999)
                         r2 = actual_results.get(num2, 999)
                         is_hit = (r1 <= 2 and r2 <= 2)
@@ -531,7 +561,11 @@ def _run_simulation(
             },
             "params": {
                 "ev_threshold": params.ev_threshold,
+                "max_ev": params.max_ev,
                 "umaren_ev_threshold": params.umaren_ev_threshold,
+                "umaren_max_ev": params.umaren_max_ev,
+                "min_probability": params.min_probability,
+                "umaren_top_n": params.umaren_top_n,
                 "bet_type": params.bet_type,
                 "bet_amount": params.bet_amount,
             },
@@ -614,6 +648,339 @@ async def run_simulation_sync(
         "status": "success",
         "results": _simulation_status["results"],
     }
+
+
+# ================== 閾値スイープ分析 ==================
+
+# 閾値スイープ状態管理
+_sweep_status = {
+    "is_running": False,
+    "phase": "idle",  # "idle", "preparing", "sweeping", "complete"
+    "progress": 0,
+    "total": 0,
+    "current_threshold": 0,
+    "total_thresholds": 0,
+    "results": None,
+    "error": None,
+}
+
+
+class ThresholdSweepParams(BaseModel):
+    """閾値スイープ分析パラメータ"""
+    bet_type: str = "tansho"  # "tansho" or "umaren"
+    ev_min: float = 0.8
+    ev_max: float = 2.0
+    ev_step: float = 0.05
+    max_ev: float = 10.0  # 期待値上限（スイープ中は固定）
+    min_probability: float = 0.01
+    umaren_top_n: int = 3
+    bet_amount: int = 100
+    limit: int = 500
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+
+
+def _run_threshold_sweep_async(
+    db: Session,
+    params: ThresholdSweepParams,
+):
+    """バックグラウンドで閾値スイープを実行"""
+    global _sweep_status
+
+    try:
+        _sweep_status["is_running"] = True
+        _sweep_status["phase"] = "preparing"
+        _sweep_status["error"] = None
+        _sweep_status["results"] = None
+
+        results = _run_threshold_sweep(db, params)
+
+        _sweep_status["results"] = {
+            "bet_type": params.bet_type,
+            "total_races": params.limit,
+            "data": results,
+        }
+        _sweep_status["phase"] = "complete"
+
+    except Exception as e:
+        logger.error(f"Threshold sweep failed: {e}")
+        _sweep_status["error"] = str(e)
+        _sweep_status["phase"] = "error"
+    finally:
+        _sweep_status["is_running"] = False
+
+
+def _run_threshold_sweep(
+    db: Session,
+    params: ThresholdSweepParams,
+) -> list[dict]:
+    """
+    閾値を変化させながらシミュレーションを実行し、
+    各閾値での回収率・シャープレシオを計算
+    """
+    global _sweep_status
+
+    predictor = prediction_service.get_predictor()
+    if predictor.model is None:
+        raise ValueError("モデルが読み込まれていません")
+
+    # レース取得
+    stmt = (
+        select(Race)
+        .where(Race.entries.any(Entry.result.isnot(None)))
+    )
+
+    if params.start_date:
+        try:
+            start = datetime.strptime(params.start_date, "%Y-%m-%d").date()
+            stmt = stmt.where(Race.date >= start)
+        except ValueError:
+            pass
+
+    if params.end_date:
+        try:
+            end = datetime.strptime(params.end_date, "%Y-%m-%d").date()
+            stmt = stmt.where(Race.date <= end)
+        except ValueError:
+            pass
+
+    stmt = stmt.order_by(Race.date.desc()).limit(params.limit)
+    races = list(db.execute(stmt).scalars().all())
+
+    if not races:
+        return []
+
+    extractor = FeatureExtractor(db)
+
+    # 進捗: データ準備フェーズ
+    _sweep_status["phase"] = "preparing"
+    _sweep_status["total"] = len(races)
+    _sweep_status["progress"] = 0
+
+    # 全レースの予測と実績を事前計算
+    race_data = []
+    for i, race in enumerate(races):
+        _sweep_status["progress"] = i + 1
+
+        df = extractor.extract_race_features(race)
+        if df.empty:
+            continue
+
+        actual_results = {}
+        odds_data = {}
+        for entry in race.entries:
+            if entry.result:
+                actual_results[entry.horse_number] = entry.result
+            if entry.odds:
+                odds_data[entry.horse_number] = entry.odds
+
+        if not actual_results or not odds_data:
+            continue
+
+        try:
+            probabilities_arr = predictor.predict_proba(df)
+        except RuntimeError:
+            continue
+
+        df["probability"] = probabilities_arr
+        df["pred_rank"] = (-probabilities_arr).argsort().argsort() + 1
+        probabilities = dict(zip(df["horse_number"].astype(int), df["probability"]))
+
+        race_data.append({
+            "df": df,
+            "actual_results": actual_results,
+            "odds_data": odds_data,
+            "probabilities": probabilities,
+        })
+
+    # 進捗: 閾値スイープフェーズ
+    _sweep_status["phase"] = "sweeping"
+    total_thresholds = int((params.ev_max - params.ev_min) / params.ev_step) + 1
+    _sweep_status["total_thresholds"] = total_thresholds
+    _sweep_status["current_threshold"] = 0
+
+    # 閾値スイープ
+    results = []
+    ev_threshold = params.ev_min
+    threshold_idx = 0
+
+    while ev_threshold <= params.ev_max + 0.001:
+        _sweep_status["current_threshold"] = threshold_idx + 1
+        threshold_idx += 1
+        returns = []  # 各賭けのリターン率（シャープレシオ計算用）
+
+        total_bet = 0
+        total_payout = 0
+        bet_count = 0
+        hit_count = 0
+
+        for rd in race_data:
+            df = rd["df"]
+            actual_results = rd["actual_results"]
+            odds_data = rd["odds_data"]
+            probabilities = rd["probabilities"]
+
+            if params.bet_type == "tansho":
+                # 単勝シミュレーション
+                for _, row in df.iterrows():
+                    horse_num = int(row["horse_number"])
+                    prob = row["probability"]
+                    odds = odds_data.get(horse_num, 0)
+
+                    if odds <= 0 or prob < params.min_probability:
+                        continue
+
+                    ev = prob * odds
+                    if ev >= ev_threshold and ev <= params.max_ev:
+                        actual_rank = actual_results.get(horse_num, 999)
+                        is_hit = actual_rank == 1
+                        payout = int(odds * params.bet_amount) if is_hit else 0
+
+                        total_bet += params.bet_amount
+                        total_payout += payout
+                        bet_count += 1
+                        if is_hit:
+                            hit_count += 1
+
+                        # リターン率を記録（シャープレシオ用）
+                        ret = (payout - params.bet_amount) / params.bet_amount
+                        returns.append(ret)
+
+            else:  # umaren
+                # 馬連シミュレーション
+                eligible_horses = df[df["probability"] >= params.min_probability]
+                top_n = eligible_horses.nsmallest(params.umaren_top_n, "pred_rank")
+
+                for (_, h1), (_, h2) in combinations(top_n.iterrows(), 2):
+                    num1, num2 = int(h1["horse_number"]), int(h2["horse_number"])
+
+                    umaren_prob = _calculate_umaren_prob(probabilities, num1, num2, len(df))
+
+                    o1 = odds_data.get(num1, 10)
+                    o2 = odds_data.get(num2, 10)
+                    estimated_odds = (o1 * o2) / 3
+
+                    ev = umaren_prob * estimated_odds
+
+                    if ev >= ev_threshold and ev <= params.max_ev:
+                        r1 = actual_results.get(num1, 999)
+                        r2 = actual_results.get(num2, 999)
+                        is_hit = (r1 <= 2 and r2 <= 2)
+                        payout = int(estimated_odds * params.bet_amount) if is_hit else 0
+
+                        total_bet += params.bet_amount
+                        total_payout += payout
+                        bet_count += 1
+                        if is_hit:
+                            hit_count += 1
+
+                        ret = (payout - params.bet_amount) / params.bet_amount
+                        returns.append(ret)
+
+        # 回収率とシャープレシオを計算
+        return_rate = (total_payout / total_bet) if total_bet > 0 else 0
+        hit_rate = (hit_count / bet_count) if bet_count > 0 else 0
+
+        # シャープレシオ計算
+        if len(returns) > 1:
+            mean_return = np.mean(returns)
+            std_return = np.std(returns)
+            sharpe_ratio = mean_return / std_return if std_return > 0 else 0
+        else:
+            sharpe_ratio = 0
+
+        results.append({
+            "ev_threshold": round(ev_threshold, 2),
+            "return_rate": round(return_rate, 4),
+            "sharpe_ratio": round(sharpe_ratio, 4),
+            "bet_count": bet_count,
+            "hit_count": hit_count,
+            "hit_rate": round(hit_rate, 4),
+            "total_bet": total_bet,
+            "total_payout": total_payout,
+            "profit": total_payout - total_bet,
+        })
+
+        ev_threshold += params.ev_step
+
+    return results
+
+
+@router.post("/simulate/threshold-sweep")
+async def start_threshold_sweep(
+    background_tasks: BackgroundTasks,
+    params: ThresholdSweepParams,
+    db: Session = Depends(get_db),
+):
+    """
+    閾値スイープ分析を開始（非同期）
+
+    バックグラウンドで実行され、進捗は /api/v1/model/simulate/threshold-sweep/status で確認できます。
+    """
+    global _sweep_status
+
+    if _sweep_status["is_running"]:
+        raise HTTPException(
+            status_code=409,
+            detail="閾値スイープ分析は既に実行中です"
+        )
+
+    # バックグラウンドで実行
+    background_tasks.add_task(_run_threshold_sweep_async, db, params)
+
+    return {
+        "status": "success",
+        "message": "閾値スイープ分析を開始しました",
+    }
+
+
+@router.get("/simulate/threshold-sweep/status")
+async def get_threshold_sweep_status():
+    """
+    閾値スイープ分析の進捗と結果を取得
+    """
+    return {
+        "status": "success",
+        "sweep": _sweep_status,
+    }
+
+
+@router.post("/simulate/threshold-sweep/sync")
+async def run_threshold_sweep_sync(
+    params: ThresholdSweepParams,
+    db: Session = Depends(get_db),
+):
+    """
+    閾値スイープ分析を同期実行（小規模データ用）
+
+    結果が即座に返されます。
+    """
+    global _sweep_status
+
+    if _sweep_status["is_running"]:
+        raise HTTPException(
+            status_code=409,
+            detail="閾値スイープ分析は既に実行中です"
+        )
+
+    try:
+        _sweep_status["is_running"] = True
+        results = _run_threshold_sweep(db, params)
+
+        return {
+            "status": "success",
+            "bet_type": params.bet_type,
+            "total_races": params.limit,
+            "data": results,
+        }
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Threshold sweep failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _sweep_status["is_running"] = False
 
 
 # ================== クラウドストレージ関連 ==================
