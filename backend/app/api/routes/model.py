@@ -1244,3 +1244,71 @@ async def retrain_and_upload(params: RetrainAndUploadParams):
 
 
 from app.config import settings
+from app.services import feature_sync_service
+
+
+# ================== 特徴量同期（Colab用） ==================
+
+class FeatureSyncParams(BaseModel):
+    """特徴量同期パラメータ"""
+    limit: Optional[int] = None  # 処理する馬の上限数（テスト用）
+
+
+@router.post("/sync-features")
+async def sync_features_to_supabase(
+    background_tasks: BackgroundTasks,
+    params: FeatureSyncParams = FeatureSyncParams(),
+    db: Session = Depends(get_db),
+):
+    """
+    馬・騎手の特徴量をSupabaseに同期
+
+    Colab用の当日予想に使用する事前計算済み特徴量をSupabase DBにアップロードします。
+    週次で実行することを推奨します。
+    """
+    if not storage_service.is_storage_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase is not configured"
+        )
+
+    # バックグラウンドで実行
+    background_tasks.add_task(
+        feature_sync_service.sync_all_features,
+        limit=params.limit
+    )
+
+    return {
+        "status": "success",
+        "message": "Feature sync started in background",
+    }
+
+
+@router.get("/sync-features/status")
+async def get_feature_sync_status():
+    """
+    特徴量同期の状態を確認
+
+    Supabase DBの特徴量テーブルの件数を返します。
+    """
+    supabase = feature_sync_service.get_supabase_client()
+    if not supabase:
+        return {
+            "status": "error",
+            "message": "Supabase not configured",
+        }
+
+    try:
+        horse_count = supabase.table("horse_features").select("id", count="exact").execute()
+        jockey_count = supabase.table("jockey_features").select("id", count="exact").execute()
+
+        return {
+            "status": "success",
+            "horse_features_count": horse_count.count if horse_count else 0,
+            "jockey_features_count": jockey_count.count if jockey_count else 0,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+        }
