@@ -1,5 +1,6 @@
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { ScrapeForm } from '@/components/features/data/ScrapeForm';
+import { SyncToSupabaseButton } from '@/components/features/data/SyncToSupabaseButton';
 import { getScrapeStats } from '@/lib/api';
 import { Database, Calendar, Users, AlertTriangle, Server, CheckCircle } from 'lucide-react';
 import { API_BASE_URL } from '@/lib/constants';
@@ -83,6 +84,9 @@ export default async function DataPage() {
         <div className={isBackendAvailable ? '' : 'opacity-60 pointer-events-none'}>
           <ScrapeForm />
         </div>
+
+        {/* Sync to Supabase */}
+        <SyncToSupabaseButton isBackendAvailable={isBackendAvailable} />
 
         {/* Stats Overview */}
         {stats ? (

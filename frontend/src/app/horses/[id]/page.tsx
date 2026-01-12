@@ -219,7 +219,14 @@ export default function HorseDetailPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {horse.race_history.map((race, index) => (
+                  {[...horse.race_history]
+                    .sort((a, b) => {
+                      // 日付の降順でソート（最新が上）
+                      if (!a.date) return 1;
+                      if (!b.date) return -1;
+                      return b.date.localeCompare(a.date);
+                    })
+                    .map((race, index) => (
                     <TableRow key={`${race.race_id}-${index}`}>
                       <TableCell className="text-gray-500 text-sm whitespace-nowrap">
                         {race.date || '-'}

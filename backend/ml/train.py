@@ -47,14 +47,14 @@ def main():
     parser.add_argument(
         "--num-boost-round",
         type=int,
-        default=1000,
-        help="Number of boosting rounds (default: 1000)",
+        default=3000,
+        help="Number of boosting rounds (default: 3000)",
     )
     parser.add_argument(
         "--early-stopping",
         type=int,
-        default=50,
-        help="Early stopping rounds (default: 50)",
+        default=100,
+        help="Early stopping rounds (default: 100)",
     )
 
     # 従来モード用引数
@@ -91,6 +91,12 @@ def main():
         type=str,
         help="[Time-split mode] Validation data end date (YYYY-MM-DD)",
     )
+    parser.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=0.05,
+        help="Label smoothing strength (0.0-0.1 recommended, default: 0.05)",
+    )
 
     args = parser.parse_args()
 
@@ -100,6 +106,7 @@ def main():
     print(f"Model version: {args.version}")
     print(f"Boosting rounds: {args.num_boost_round}")
     print(f"Early stopping: {args.early_stopping}")
+    print(f"Label smoothing: {args.label_smoothing}")
 
     if args.time_split:
         if not args.train_end or not args.valid_end:
@@ -159,7 +166,10 @@ def train_legacy_mode(db, args):
 
     # モデル学習
     print("\n[2/3] Training model...")
-    predictor = HorseRacingPredictor(model_version=args.version)
+    predictor = HorseRacingPredictor(
+        model_version=args.version,
+        label_smoothing=args.label_smoothing,
+    )
 
     results = predictor.train(
         X,
@@ -169,8 +179,10 @@ def train_legacy_mode(db, args):
         valid_fraction=args.valid_fraction,
     )
 
-    print(f"  - Train RMSE: {results['train_rmse']:.4f}")
-    print(f"  - Valid RMSE: {results['valid_rmse']:.4f}")
+    print(f"  - Train LogLoss: {results['train_logloss']:.4f}")
+    print(f"  - Valid LogLoss: {results['valid_logloss']:.4f}")
+    print(f"  - Train AUC: {results['train_auc']:.4f}")
+    print(f"  - Valid AUC: {results['valid_auc']:.4f}")
     print(f"  - Best iteration: {results['best_iteration']}")
 
     # モデル保存
@@ -229,37 +241,56 @@ def train_with_time_split(db, args):
     print(f"    Valid: {dr['valid'][0]} ~ {dr['valid'][1]}")
     print(f"    Test:  {dr['test'][0]} ~ latest")
 
-    # モデル学習
-    print("\n[2/4] Training model with time-split data...")
-    predictor = HorseRacingPredictor(model_version=args.version)
-
-    results = predictor.train_with_validation(
-        X_train,
-        y_train,
-        X_valid,
-        y_valid,
-        num_boost_round=args.num_boost_round,
-        early_stopping_rounds=args.early_stopping,
+    # モデル学習（Train/Valid/Testの3分割）
+    print("\n[2/4] Training model with train/valid/test split...")
+    print("       - Train: 学習に使用")
+    print("       - Valid: Early Stoppingのモニタリング（学習に使用しない）")
+    print("       - Test:  最終評価用（学習・モニタリングに使用しない）")
+    print(f"       - Label smoothing: {args.label_smoothing}")
+    predictor = HorseRacingPredictor(
+        model_version=args.version,
+        label_smoothing=args.label_smoothing,
     )
 
-    print(f"  - Train RMSE: {results['train_rmse']:.4f}")
-    print(f"  - Valid RMSE: {results['valid_rmse']:.4f}")
-    print(f"  - Best iteration: {results['best_iteration']}")
-
-    # テストデータで評価（学習には使わない）
-    print("\n[3/4] Evaluating on test data...")
-    if not X_test.empty:
-        test_pred = predictor.predict(X_test)
-        y_test_rank = y_test.max() - y_test + 1
-        test_rmse = (((test_pred - y_test_rank) ** 2).mean()) ** 0.5
-
-        # 1位的中率
-        # グループごとに予測1位と実際の1位を比較する必要があるが、
-        # 簡易版として全体での精度を表示
-        print(f"  - Test RMSE: {test_rmse:.4f}")
-        print(f"  - Test samples: {len(X_test)}")
+    if X_test.empty:
+        # テストデータがない場合は従来のtrain_with_validationを使用
+        print("\n  [Warning] No test data available, using train/valid split only")
+        results = predictor.train_with_validation(
+            X_train,
+            y_train,
+            X_valid,
+            y_valid,
+            num_boost_round=args.num_boost_round,
+            early_stopping_rounds=args.early_stopping,
+        )
     else:
-        print("  - No test data available")
+        # 3分割で学習
+        results = predictor.train_with_test_split(
+            X_train,
+            y_train,
+            X_valid,
+            y_valid,
+            X_test,
+            y_test,
+            num_boost_round=args.num_boost_round,
+            early_stopping_rounds=args.early_stopping,
+        )
+
+    # 評価結果の表示
+    print("\n[3/4] Evaluation results...")
+    print(f"  [Train] LogLoss: {results['train_logloss']:.4f}, AUC: {results['train_auc']:.4f}")
+    print(f"  [Valid] LogLoss: {results['valid_logloss']:.4f}, AUC: {results['valid_auc']:.4f}")
+    if 'test_logloss' in results:
+        print(f"  [Test]  LogLoss: {results['test_logloss']:.4f}, AUC: {results['test_auc']:.4f}")
+    print(f"  Best iteration: {results['best_iteration']}")
+
+    # 過学習チェック
+    if 'overfit_gap' in results:
+        print(f"\n  [Overfitting Check]")
+        print(f"    Train→Valid gap: {results['overfit_gap']:.4f}")
+        print(f"    Valid→Test gap:  {results['generalization_gap']:.4f}")
+        if results['overfit_gap'] > 0.1:
+            print("    ⚠️  Warning: Model may be overfitting (train→valid gap > 0.1)")
 
     # モデル保存
     print("\n[4/4] Saving model...")

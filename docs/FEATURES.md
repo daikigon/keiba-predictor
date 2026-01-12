@@ -2,7 +2,7 @@
 
 ## 1. 特徴量一覧
 
-機械学習モデルに使用する特徴量の定義。
+機械学習モデルに使用する特徴量の定義。現在のモデルは**97個の特徴量**を使用。
 
 ---
 
@@ -105,17 +105,73 @@
 
 ---
 
-## 10. 調教情報
+## 10. 脚質・走法特徴量 (新規追加)
+
+corner_positionから算出する脚質関連の特徴量。
 
 | 特徴量名 | 型 | 説明 |
 |---------|-----|------|
-| training_rank | category | 調教評価 (A/B/C) |
-| training_time | float | 調教タイム |
-| training_course | category | 調教コース |
+| running_style | int | 脚質分類 (1:逃げ, 2:先行, 3:差し, 4:追込) |
+| avg_first_corner_position | float | 平均1コーナー通過順位 |
+| avg_final_corner_position | float | 平均最終コーナー通過順位 |
+| position_change | float | 平均順位変動（最終-1コーナー） |
+| front_rate | float | 前方レート（先行率） |
+| is_front_runner | int | 逃げ馬フラグ |
+| is_closer | int | 追込馬フラグ |
+| position_consistency | float | 脚質の安定性 |
 
 ---
 
-## 11. 特徴量生成パイプライン
+## 11. 季節特徴量 (新規追加)
+
+レース日付から算出する季節関連の特徴量。
+
+| 特徴量名 | 型 | 説明 |
+|---------|-----|------|
+| month | int | レース月 |
+| quarter | int | 四半期 (1-4) |
+| is_spring | int | 春フラグ (3-5月) |
+| is_summer | int | 夏フラグ (6-8月) |
+| is_autumn | int | 秋フラグ (9-11月) |
+| is_winter | int | 冬フラグ (12-2月) |
+| is_g1_season | int | G1シーズンフラグ (春秋) |
+| day_of_week | int | 曜日 (0:月-6:日) |
+
+---
+
+## 12. ペース特徴量 (新規追加)
+
+過去レースのペース情報から算出。
+
+| 特徴量名 | 型 | 説明 |
+|---------|-----|------|
+| avg_pace | float | 平均ペース |
+| slow_pace_win_rate | float | スローペース時の勝率 |
+| fast_pace_win_rate | float | ハイペース時の勝率 |
+| pace_adaptability | float | ペース適応力 |
+
+---
+
+## 13. 人気別パフォーマンス特徴量 (新規追加)
+
+人気帯別の過去成績から算出。
+
+| 特徴量名 | 型 | 説明 |
+|---------|-----|------|
+| low_pop_win_rate | float | 低人気時(6位以下)の勝率 |
+| mid_pop_win_rate | float | 中人気時(3-5位)の勝率 |
+| high_pop_win_rate | float | 高人気時(1-2位)の勝率 |
+| pop_performance_ratio | float | 人気と着順の乖離度 |
+| favorite_success_rate | float | 1番人気時の成功率 |
+| upset_rate | float | 穴馬(6位以下)で3着以内率 |
+| consistency_by_pop | float | 人気帯別成績の安定性 |
+| overperform_rate | float | 人気を上回る率 |
+| underperform_rate | float | 人気を下回る率 |
+| avg_odds_when_win | float | 勝利時の平均オッズ |
+
+---
+
+## 14. 特徴量生成パイプライン
 
 ```python
 # 処理フロー
@@ -127,20 +183,43 @@
    |
 3. 過去成績集計
    - 直近N走のwindow計算
+   - キャッシュによる高速化 (preload_horse_history)
    |
-4. カテゴリ変数エンコーディング
+4. 新規特徴量計算
+   - 脚質特徴量 (corner_position)
+   - 季節特徴量 (race_date)
+   - ペース特徴量 (pace)
+   - 人気別パフォーマンス (popularity, result)
+   |
+5. カテゴリ変数エンコーディング
    - LightGBM: そのまま (native support)
    - その他: Label Encoding / Target Encoding
    |
-5. スケーリング (必要に応じて)
+6. スケーリング (必要に応じて)
    - StandardScaler for NN
    |
-6. 特徴量ベクトル生成
+7. 特徴量ベクトル生成
 ```
 
 ---
 
-## 12. 特徴量重要度 (参考)
+## 15. ターゲット変数の設計
+
+### target_strategy パラメータ
+
+| 値 | 説明 | 正例の定義 |
+|----|------|-----------|
+| 0 | 従来方式 | 1着のみ |
+| 2 | タイム同着を含む (推奨) | 1着 + 1着と同タイムの馬 |
+
+**target_strategy=2 の効果:**
+- 僅差で負けた馬も正例として扱うことでモデルの学習能力を向上
+- 正例サンプルが約20%増加
+- 参考PDF「完成した競馬AIのソースコード + 使い方まとめ」で推奨される設定
+
+---
+
+## 16. 特徴量重要度 (参考)
 
 モデル学習後に更新予定。
 
@@ -152,8 +231,9 @@
 
 ---
 
-## 13. 注意事項
+## 17. 注意事項
 
 - リークに注意: レース結果に関連する情報は特徴量に含めない
 - オッズは予測時点で取得可能な情報のみ使用
 - 未来情報の混入を防ぐため、時系列での分割を徹底
+- 過去成績の取得は `preload_horse_history()` でキャッシュを活用し高速化

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.logging_config import setup_logging, get_logger
-from app.api.routes import races, predictions, history, data, stats, model, horses, jockeys
+from app.api.routes import races, predictions, history, data, stats, model, horses, jockeys, sync
 
 # ログ設定の初期化
 setup_logging()
@@ -33,6 +33,7 @@ app.include_router(stats.router, prefix="/api/v1/stats", tags=["stats"])
 app.include_router(model.router, prefix="/api/v1/model", tags=["model"])
 app.include_router(horses.router, prefix="/api/v1/horses", tags=["horses"])
 app.include_router(jockeys.router, prefix="/api/v1/jockeys", tags=["jockeys"])
+app.include_router(sync.router, prefix="/api/v1/sync", tags=["sync"])
 
 
 @app.on_event("startup")

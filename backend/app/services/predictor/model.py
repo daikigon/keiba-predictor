@@ -26,21 +26,30 @@ MODEL_DIR = Path(__file__).parent.parent.parent.parent / "ml" / "models"
 class HorseRacingPredictor:
     """競馬予測モデル（キャリブレーション機能付き）"""
 
-    def __init__(self, model_version: str = "v1"):
+    def __init__(self, model_version: str = "v1", label_smoothing: float = 0.0):
+        """
+        Args:
+            model_version: モデルバージョン
+            label_smoothing: ラベルスムージングの強度（0.0-0.1推奨）
+                           0.0: スムージングなし（従来通り）
+                           0.05: 軽いスムージング（推奨）
+                           参考PDFでは目的変数に「少し加工」を施していると記載
+        """
         self.model_version = model_version
         self.model: Optional[lgb.Booster] = None
         self.scaler: Optional[StandardScaler] = None
         self.calibrator: Optional[IsotonicRegression] = None
         self.feature_columns = get_feature_columns()
         self.use_calibration = True  # キャリブレーション使用フラグ
+        self.label_smoothing = label_smoothing  # ラベルスムージング
 
     def train(
         self,
         X: pd.DataFrame,
         y: pd.Series,
         params: Optional[dict] = None,
-        num_boost_round: int = 1000,
-        early_stopping_rounds: int = 50,
+        num_boost_round: int = 3000,
+        early_stopping_rounds: int = 100,
         valid_fraction: float = 0.2,
     ) -> dict:
         """
@@ -57,15 +66,14 @@ class HorseRacingPredictor:
         Returns:
             学習結果（メトリクス等）
         """
-        # デフォルトパラメータ
+        # デフォルトパラメータ（二値分類：1着か否か）
         if params is None:
             params = {
-                "objective": "lambdarank",
-                "metric": "ndcg",
-                "ndcg_eval_at": [1, 3, 5],
+                "objective": "binary",
+                "metric": "binary_logloss",
                 "boosting_type": "gbdt",
-                "num_leaves": 31,
-                "learning_rate": 0.05,
+                "num_leaves": 63,
+                "learning_rate": 0.01,
                 "feature_fraction": 0.8,
                 "bagging_fraction": 0.8,
                 "bagging_freq": 5,
@@ -88,20 +96,19 @@ class HorseRacingPredictor:
         y_train = y.iloc[:split_idx]
         y_valid = y.iloc[split_idx:]
 
-        # ランキング学習用のグループ作成
-        # 着順を反転（1位が最高スコア）
-        y_train_rank = y_train.max() - y_train + 1
-        y_valid_rank = y_valid.max() - y_valid + 1
+        # 二値分類用のラベル作成（1着=1, それ以外=0）
+        y_train_binary = (y_train == 1).astype(float)
+        y_valid_binary = (y_valid == 1).astype(float)
+
+        # ラベルスムージング適用（学習データのみ）
+        if self.label_smoothing > 0:
+            y_train_smoothed = self._apply_label_smoothing(y_train_binary)
+        else:
+            y_train_smoothed = y_train_binary
 
         # LightGBMデータセット作成
-        # NOTE: ランキング学習ではグループ情報が必要だが、
-        # ここでは回帰として学習し、予測値でソートする簡易版を使用
-        params["objective"] = "regression"
-        params["metric"] = "rmse"
-        del params["ndcg_eval_at"]
-
-        train_data = lgb.Dataset(X_train, label=y_train_rank)
-        valid_data = lgb.Dataset(X_valid, label=y_valid_rank, reference=train_data)
+        train_data = lgb.Dataset(X_train, label=y_train_smoothed)
+        valid_data = lgb.Dataset(X_valid, label=y_valid_binary, reference=train_data)
 
         # 学習
         callbacks = [
@@ -122,18 +129,179 @@ class HorseRacingPredictor:
         train_pred = self.model.predict(X_train)
         valid_pred = self.model.predict(X_valid)
 
-        # === キャリブレーションの学習 ===
-        # 検証データを使ってキャリブレーターを学習
+        # 二値分類の評価指標（Log Loss）
+        from sklearn.metrics import log_loss, roc_auc_score
+        train_logloss = log_loss(y_train_binary, train_pred)
+        valid_logloss = log_loss(y_valid_binary, valid_pred)
+
+        # AUC（勝ち馬を上位に予測できているか）
+        try:
+            train_auc = roc_auc_score(y_train_binary, train_pred)
+            valid_auc = roc_auc_score(y_valid_binary, valid_pred)
+        except ValueError:
+            train_auc = 0.0
+            valid_auc = 0.0
+
+        # キャリブレーションの学習（二値分類でも微調整用に維持）
         self._train_calibrator(X_valid, y_valid, valid_pred)
 
         results = {
-            "train_rmse": np.sqrt(np.mean((train_pred - y_train_rank) ** 2)),
-            "valid_rmse": np.sqrt(np.mean((valid_pred - y_valid_rank) ** 2)),
+            "train_logloss": train_logloss,
+            "valid_logloss": valid_logloss,
+            "train_auc": train_auc,
+            "valid_auc": valid_auc,
             "best_iteration": self.model.best_iteration,
             "num_features": len(self.feature_columns),
             "num_train_samples": len(X_train),
             "num_valid_samples": len(X_valid),
             "calibrator_trained": self.calibrator is not None,
+        }
+
+        return results
+
+    def train_with_test_split(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_valid: pd.DataFrame,
+        y_valid: pd.Series,
+        X_test: pd.DataFrame,
+        y_test: pd.Series,
+        params: Optional[dict] = None,
+        num_boost_round: int = 3000,
+        early_stopping_rounds: int = 100,
+    ) -> dict:
+        """
+        Train/Valid/Testの3分割でモデルを学習する
+
+        - Train: 学習に使用
+        - Valid: Early Stoppingのモニタリングに使用（学習には使わない）
+        - Test: 最終的な精度確認に使用（学習・モニタリングには使わない）
+
+        Args:
+            X_train: 学習用特徴量DataFrame
+            y_train: 学習用ターゲット（着順）
+            X_valid: 検証用特徴量DataFrame（Early Stopping用）
+            y_valid: 検証用ターゲット
+            X_test: テスト用特徴量DataFrame（最終評価用）
+            y_test: テスト用ターゲット
+            params: LightGBMパラメータ
+            num_boost_round: 最大ブースティング回数
+            early_stopping_rounds: Early Stopping回数（validのloglossが改善しない回数）
+
+        Returns:
+            学習結果（train/valid/testの各メトリクス）
+        """
+        # デフォルトパラメータ（二値分類：1着か否か）
+        if params is None:
+            params = {
+                "objective": "binary",
+                "metric": "binary_logloss",
+                "boosting_type": "gbdt",
+                "num_leaves": 63,
+                "learning_rate": 0.01,
+                "feature_fraction": 0.8,
+                "bagging_fraction": 0.8,
+                "bagging_freq": 5,
+                "verbose": -1,
+                "seed": 42,
+            }
+
+        # スケーリング（学習データでfitし、valid/testにはtransformのみ）
+        self.scaler = StandardScaler()
+        X_train_scaled = pd.DataFrame(
+            self.scaler.fit_transform(X_train),
+            columns=X_train.columns,
+            index=X_train.index,
+        )
+        X_valid_scaled = pd.DataFrame(
+            self.scaler.transform(X_valid),
+            columns=X_valid.columns,
+            index=X_valid.index,
+        )
+        X_test_scaled = pd.DataFrame(
+            self.scaler.transform(X_test),
+            columns=X_test.columns,
+            index=X_test.index,
+        )
+
+        # 二値分類用のラベル作成（1着=1, それ以外=0）
+        y_train_binary = (y_train == 1).astype(float)
+        y_valid_binary = (y_valid == 1).astype(float)
+        y_test_binary = (y_test == 1).astype(float)
+
+        # ラベルスムージング適用（学習データのみ）
+        # 参考PDFの「目的変数に少し加工」に対応
+        if self.label_smoothing > 0:
+            y_train_smoothed = self._apply_label_smoothing(y_train_binary)
+        else:
+            y_train_smoothed = y_train_binary
+
+        # LightGBMデータセット作成（学習データにはスムージング適用）
+        train_data = lgb.Dataset(X_train_scaled, label=y_train_smoothed)
+        valid_data = lgb.Dataset(X_valid_scaled, label=y_valid_binary, reference=train_data)
+
+        # 学習（Early StoppingはValidデータで監視）
+        callbacks = [
+            lgb.early_stopping(stopping_rounds=early_stopping_rounds),
+            lgb.log_evaluation(period=100),
+        ]
+
+        self.model = lgb.train(
+            params,
+            train_data,
+            num_boost_round=num_boost_round,
+            valid_sets=[train_data, valid_data],
+            valid_names=["train", "valid"],
+            callbacks=callbacks,
+        )
+
+        # 各データセットで予測
+        train_pred = self.model.predict(X_train_scaled)
+        valid_pred = self.model.predict(X_valid_scaled)
+        test_pred = self.model.predict(X_test_scaled)
+
+        # 評価指標の計算
+        from sklearn.metrics import log_loss, roc_auc_score
+
+        # Log Loss
+        train_logloss = log_loss(y_train_binary, train_pred)
+        valid_logloss = log_loss(y_valid_binary, valid_pred)
+        test_logloss = log_loss(y_test_binary, test_pred)
+
+        # AUC
+        try:
+            train_auc = roc_auc_score(y_train_binary, train_pred)
+            valid_auc = roc_auc_score(y_valid_binary, valid_pred)
+            test_auc = roc_auc_score(y_test_binary, test_pred)
+        except ValueError:
+            train_auc = 0.0
+            valid_auc = 0.0
+            test_auc = 0.0
+
+        # キャリブレーションの学習（Validデータを使用）
+        self._train_calibrator(X_valid_scaled, y_valid, valid_pred)
+
+        results = {
+            # Train metrics
+            "train_logloss": train_logloss,
+            "train_auc": train_auc,
+            "num_train_samples": len(X_train),
+            # Valid metrics（Early Stopping監視用）
+            "valid_logloss": valid_logloss,
+            "valid_auc": valid_auc,
+            "num_valid_samples": len(X_valid),
+            # Test metrics（最終評価、学習には未使用）
+            "test_logloss": test_logloss,
+            "test_auc": test_auc,
+            "num_test_samples": len(X_test),
+            # Model info
+            "best_iteration": self.model.best_iteration,
+            "num_features": len(self.feature_columns),
+            "calibrator_trained": self.calibrator is not None,
+            # 過学習チェック
+            "overfit_gap": valid_logloss - train_logloss,
+            "generalization_gap": test_logloss - valid_logloss,
         }
 
         return results
@@ -145,11 +313,12 @@ class HorseRacingPredictor:
         X_valid: pd.DataFrame,
         y_valid: pd.Series,
         params: Optional[dict] = None,
-        num_boost_round: int = 1000,
-        early_stopping_rounds: int = 50,
+        num_boost_round: int = 3000,
+        early_stopping_rounds: int = 100,
     ) -> dict:
         """
         事前に分割されたデータでモデルを学習する（時系列分割用）
+        ※ train_with_test_split の使用を推奨
 
         Args:
             X_train: 学習用特徴量DataFrame
@@ -163,14 +332,14 @@ class HorseRacingPredictor:
         Returns:
             学習結果（メトリクス等）
         """
-        # デフォルトパラメータ
+        # デフォルトパラメータ（二値分類：1着か否か）
         if params is None:
             params = {
-                "objective": "regression",
-                "metric": "rmse",
+                "objective": "binary",
+                "metric": "binary_logloss",
                 "boosting_type": "gbdt",
-                "num_leaves": 31,
-                "learning_rate": 0.05,
+                "num_leaves": 63,
+                "learning_rate": 0.01,
                 "feature_fraction": 0.8,
                 "bagging_fraction": 0.8,
                 "bagging_freq": 5,
@@ -191,13 +360,19 @@ class HorseRacingPredictor:
             index=X_valid.index,
         )
 
-        # ランキング学習用: 着順を反転（1位が最高スコア）
-        y_train_rank = y_train.max() - y_train + 1
-        y_valid_rank = y_valid.max() - y_valid + 1
+        # 二値分類用のラベル作成（1着=1, それ以外=0）
+        y_train_binary = (y_train == 1).astype(float)
+        y_valid_binary = (y_valid == 1).astype(float)
+
+        # ラベルスムージング適用（学習データのみ）
+        if self.label_smoothing > 0:
+            y_train_smoothed = self._apply_label_smoothing(y_train_binary)
+        else:
+            y_train_smoothed = y_train_binary
 
         # LightGBMデータセット作成
-        train_data = lgb.Dataset(X_train_scaled, label=y_train_rank)
-        valid_data = lgb.Dataset(X_valid_scaled, label=y_valid_rank, reference=train_data)
+        train_data = lgb.Dataset(X_train_scaled, label=y_train_smoothed)
+        valid_data = lgb.Dataset(X_valid_scaled, label=y_valid_binary, reference=train_data)
 
         # 学習
         callbacks = [
@@ -218,12 +393,27 @@ class HorseRacingPredictor:
         train_pred = self.model.predict(X_train_scaled)
         valid_pred = self.model.predict(X_valid_scaled)
 
-        # キャリブレーションの学習
+        # 二値分類の評価指標（Log Loss）
+        from sklearn.metrics import log_loss, roc_auc_score
+        train_logloss = log_loss(y_train_binary, train_pred)
+        valid_logloss = log_loss(y_valid_binary, valid_pred)
+
+        # AUC（勝ち馬を上位に予測できているか）
+        try:
+            train_auc = roc_auc_score(y_train_binary, train_pred)
+            valid_auc = roc_auc_score(y_valid_binary, valid_pred)
+        except ValueError:
+            train_auc = 0.0
+            valid_auc = 0.0
+
+        # キャリブレーションの学習（二値分類でも微調整用に維持）
         self._train_calibrator(X_valid_scaled, y_valid, valid_pred)
 
         results = {
-            "train_rmse": np.sqrt(np.mean((train_pred - y_train_rank) ** 2)),
-            "valid_rmse": np.sqrt(np.mean((valid_pred - y_valid_rank) ** 2)),
+            "train_logloss": train_logloss,
+            "valid_logloss": valid_logloss,
+            "train_auc": train_auc,
+            "valid_auc": valid_auc,
             "best_iteration": self.model.best_iteration,
             "num_features": len(self.feature_columns),
             "num_train_samples": len(X_train),
@@ -232,6 +422,23 @@ class HorseRacingPredictor:
         }
 
         return results
+
+    def _apply_label_smoothing(self, y: pd.Series) -> pd.Series:
+        """
+        ラベルスムージングを適用
+
+        参考PDFの「目的変数に少し加工」に対応。
+        過学習を防ぎ、キャリブレーションを改善する効果がある。
+
+        Args:
+            y: 二値ラベル（0 or 1）
+
+        Returns:
+            スムージングされたラベル
+        """
+        # y=1 → 1-smoothing, y=0 → smoothing
+        # 例: smoothing=0.05の場合、1→0.95, 0→0.05
+        return y * (1 - self.label_smoothing) + (1 - y) * self.label_smoothing
 
     def _train_calibrator(
         self,
@@ -307,38 +514,28 @@ class HorseRacingPredictor:
 
     def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
         """
-        キャリブレーション済み確率を予測
+        勝率を予測（二値分類モデルの出力）
 
         Args:
             X: 特徴量DataFrame
 
         Returns:
-            キャリブレーション済み勝率（0-1）
+            勝率（0-1）、レース内で合計が1になるよう正規化
         """
-        scores = self.predict(X)
+        # 二値分類モデルは直接確率を出力
+        probs = self.predict(X)
 
         if self.calibrator is not None and self.use_calibration:
-            # スコアを0-1に正規化
-            pred_min = scores.min()
-            pred_max = scores.max()
-            if pred_max > pred_min:
-                scores_normalized = (scores - pred_min) / (pred_max - pred_min)
-            else:
-                scores_normalized = np.full_like(scores, 0.5)
+            # キャリブレーション適用（微調整）
+            calibrated_probs = self.calibrator.predict(probs)
+            probs = calibrated_probs
 
-            # キャリブレーション適用
-            calibrated_probs = self.calibrator.predict(scores_normalized)
+        # 確率の正規化（レース内で合計が1になるように）
+        total = probs.sum()
+        if total > 0:
+            probs = probs / total
 
-            # 確率の正規化（合計が1になるように）
-            total = calibrated_probs.sum()
-            if total > 0:
-                calibrated_probs = calibrated_probs / total
-
-            return calibrated_probs
-        else:
-            # キャリブレーターがない場合はソフトマックス
-            exp_scores = np.exp(scores - np.max(scores))
-            return exp_scores / exp_scores.sum()
+        return probs
 
     def predict_ranking(self, X: pd.DataFrame) -> list[int]:
         """
@@ -380,6 +577,7 @@ class HorseRacingPredictor:
             "calibrator": self.calibrator,
             "feature_columns": self.feature_columns,
             "model_version": self.model_version,
+            "label_smoothing": self.label_smoothing,
         }
 
         with open(path, "wb") as f:
@@ -408,6 +606,7 @@ class HorseRacingPredictor:
         self.calibrator = model_data.get("calibrator")  # 後方互換性
         self.feature_columns = model_data["feature_columns"]
         self.model_version = model_data["model_version"]
+        self.label_smoothing = model_data.get("label_smoothing", 0.0)  # 後方互換性
 
     def get_feature_importance(self) -> pd.DataFrame:
         """

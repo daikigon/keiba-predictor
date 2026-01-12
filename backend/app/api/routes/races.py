@@ -131,21 +131,26 @@ async def scrape_race_detail(
     """Scrape race detail and save to database"""
     # force=Trueの場合はスキップしない
     actual_skip = False if force else skip_existing
-    # Check if race already exists with entries
+    # Check if race already exists with sufficient entries
+    # 馬データ補完で作成された不完全なレース（エントリー1件のみ）はスキップしない
     if actual_skip:
         existing_race = race_service.get_race_by_id(db, race_id)
-        if existing_race and len(existing_race.entries) > 0:
-            return {
-                "status": "skipped",
-                "saved": False,
-                "skipped": True,
-                "reason": "Race already has entries",
-                "race": {
-                    "race_id": race_id,
-                    "race_name": existing_race.race_name,
-                    "entries_count": len(existing_race.entries),
-                },
-            }
+        if existing_race:
+            entries_count = len(existing_race.entries)
+            # num_horsesがある場合は半分以上、ない場合は5件以上でスキップ
+            min_entries = (existing_race.num_horses // 2) if existing_race.num_horses else 5
+            if entries_count >= min_entries:
+                return {
+                    "status": "skipped",
+                    "saved": False,
+                    "skipped": True,
+                    "reason": "Race already has sufficient entries",
+                    "race": {
+                        "race_id": race_id,
+                        "race_name": existing_race.race_name,
+                        "entries_count": entries_count,
+                    },
+                }
 
     scraper = RaceDetailScraper()
     race_detail = scraper.scrape(race_id)
@@ -206,22 +211,27 @@ async def scrape_race_card_detail(
     """Scrape race card detail (出馬表) from race.netkeiba.com"""
     # force=Trueの場合はスキップしない
     actual_skip = False if force else skip_existing
-    # Check if race already exists with entries
+    # Check if race already exists with sufficient entries
+    # 馬データ補完で作成された不完全なレース（エントリー1件のみ）はスキップしない
     if actual_skip:
         existing_race = race_service.get_race_by_id(db, race_id)
-        if existing_race and len(existing_race.entries) > 0:
-            return {
-                "status": "skipped",
-                "saved": False,
-                "skipped": True,
-                "reason": "Race already has entries",
-                "race": {
-                    "race_id": race_id,
-                    "race_name": existing_race.race_name,
-                    "entries_count": len(existing_race.entries),
-                },
-                "source": "race.netkeiba.com",
-            }
+        if existing_race:
+            entries_count = len(existing_race.entries)
+            # num_horsesがある場合は半分以上、ない場合は5件以上でスキップ
+            min_entries = (existing_race.num_horses // 2) if existing_race.num_horses else 5
+            if entries_count >= min_entries:
+                return {
+                    "status": "skipped",
+                    "saved": False,
+                    "skipped": True,
+                    "reason": "Race already has sufficient entries",
+                    "race": {
+                        "race_id": race_id,
+                        "race_name": existing_race.race_name,
+                        "entries_count": entries_count,
+                    },
+                    "source": "race.netkeiba.com",
+                }
 
     scraper = RaceCardScraper()
     race_detail = scraper.scrape(race_id)

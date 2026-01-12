@@ -1016,11 +1016,29 @@ export default function ModelPage() {
   );
 }
 
+// 履歴エントリの型
+interface SweepHistoryEntry {
+  id: string;
+  timestamp: string;
+  params: {
+    bet_type: string;
+    ev_min: number;
+    ev_max: number;
+    limit: number;
+  };
+  result: ThresholdSweepResult;
+}
+
+const SWEEP_HISTORY_KEY = 'threshold_sweep_history';
+const MAX_HISTORY = 5;
+
 function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean }) {
   const [sweepStatus, setSweepStatus] = useState<ThresholdSweepStatus | null>(null);
   const [sweepResult, setSweepResult] = useState<ThresholdSweepResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<SweepHistoryEntry[]>([]);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string>('');
   const [sweepParams, setSweepParams] = useState({
     bet_type: 'tansho' as 'tansho' | 'umaren',
     ev_min: 0.8,
@@ -1031,11 +1049,56 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
     end_date: '',
   });
 
+  // 履歴をlocalStorageから読み込み
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem(SWEEP_HISTORY_KEY);
+      if (saved) {
+        try {
+          setHistory(JSON.parse(saved));
+        } catch {}
+      }
+    }
+  }, []);
+
+  // 履歴に保存
+  const saveToHistory = (result: ThresholdSweepResult) => {
+    const entry: SweepHistoryEntry = {
+      id: Date.now().toString(),
+      timestamp: new Date().toLocaleString('ja-JP'),
+      params: {
+        bet_type: sweepParams.bet_type,
+        ev_min: sweepParams.ev_min,
+        ev_max: sweepParams.ev_max,
+        limit: sweepParams.limit,
+      },
+      result,
+    };
+
+    const newHistory = [entry, ...history].slice(0, MAX_HISTORY);
+    setHistory(newHistory);
+    localStorage.setItem(SWEEP_HISTORY_KEY, JSON.stringify(newHistory));
+  };
+
+  // 履歴選択時
+  const handleSelectHistory = (id: string) => {
+    setSelectedHistoryId(id);
+    if (id === '') {
+      // 現在の結果を表示
+      return;
+    }
+    const entry = history.find((h) => h.id === id);
+    if (entry) {
+      setSweepResult(entry.result);
+    }
+  };
+
   const handleRunSweep = async () => {
     setIsLoading(true);
     setError(null);
     setSweepResult(null);
     setSweepStatus(null);
+    setSelectedHistoryId('');
 
     try {
       const params = {
@@ -1059,6 +1122,8 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
               setError(status.error);
             } else if (status.results) {
               setSweepResult(status.results);
+              // 履歴に保存
+              saveToHistory(status.results);
             }
           }
         } catch (pollErr) {
@@ -1082,9 +1147,29 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
   return (
     <Card className={cn("mt-6", !backendAvailable && "opacity-60 pointer-events-none")}>
       <CardHeader>
-        <div className="flex items-center gap-2">
-          <LineChartIcon className="w-5 h-5 text-purple-600" />
-          <CardTitle>閾値スイープ分析</CardTitle>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <LineChartIcon className="w-5 h-5 text-purple-600" />
+            <CardTitle>閾値スイープ分析</CardTitle>
+          </div>
+          {/* 履歴セレクター */}
+          {history.length > 0 && (
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-gray-400" />
+              <select
+                value={selectedHistoryId}
+                onChange={(e) => handleSelectHistory(e.target.value)}
+                className="text-sm border rounded-lg px-2 py-1 bg-white"
+              >
+                <option value="">-- 履歴を選択 --</option>
+                {history.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.timestamp} ({h.params.bet_type === 'tansho' ? '単勝' : '馬連'}, EV {h.params.ev_min}~{h.params.ev_max})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </CardHeader>
       <CardContent>
@@ -1297,7 +1382,7 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
                           {best.return_rate_pct.toFixed(1)}% (EV≥{best.ev_threshold})
                         </p>
                         <p className="text-xs text-blue-500">
-                          {best.bet_count}点 / 的中{best.hit_count}回
+                          {best.bet_count}点 / {best.race_count ?? '?'}レース / 的中{best.hit_count}回
                         </p>
                       </div>
                     );
@@ -1336,6 +1421,7 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
                         <th className="p-2 text-right">回収率</th>
                         <th className="p-2 text-right">シャープ</th>
                         <th className="p-2 text-right">賭数</th>
+                        <th className="p-2 text-right">レース数</th>
                         <th className="p-2 text-right">的中</th>
                         <th className="p-2 text-right">収支</th>
                       </tr>
@@ -1349,6 +1435,7 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
                           </td>
                           <td className="p-2 text-right">{d.sharpe_ratio.toFixed(3)}</td>
                           <td className="p-2 text-right">{d.bet_count}</td>
+                          <td className="p-2 text-right text-gray-500">{d.race_count ?? '-'}</td>
                           <td className="p-2 text-right">{d.hit_count}</td>
                           <td className={cn('p-2 text-right', d.profit >= 0 ? 'text-green-600' : 'text-red-600')}>
                             {d.profit >= 0 ? '+' : ''}{d.profit.toLocaleString()}

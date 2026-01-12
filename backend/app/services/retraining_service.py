@@ -71,10 +71,23 @@ class RetrainingResult:
         self.success = False
         self.model_version: Optional[str] = None
         self.model_path: Optional[str] = None
-        self.train_rmse: Optional[float] = None
-        self.valid_rmse: Optional[float] = None
-        self.num_samples: int = 0
+        # 新しい評価指標（二値分類用）
+        self.train_logloss: Optional[float] = None
+        self.valid_logloss: Optional[float] = None
+        self.test_logloss: Optional[float] = None
+        self.train_auc: Optional[float] = None
+        self.valid_auc: Optional[float] = None
+        self.test_auc: Optional[float] = None
+        self.best_iteration: Optional[int] = None
+        # サンプル数
+        self.num_train_samples: int = 0
+        self.num_valid_samples: int = 0
+        self.num_test_samples: int = 0
         self.num_features: int = 0
+        # 過学習チェック
+        self.overfit_gap: Optional[float] = None
+        self.generalization_gap: Optional[float] = None
+        # その他
         self.error: Optional[str] = None
         self.started_at: Optional[datetime] = None
         self.completed_at: Optional[datetime] = None
@@ -84,10 +97,23 @@ class RetrainingResult:
             "success": self.success,
             "model_version": self.model_version,
             "model_path": self.model_path,
-            "train_rmse": self.train_rmse,
-            "valid_rmse": self.valid_rmse,
-            "num_samples": self.num_samples,
+            # 評価指標
+            "train_logloss": self.train_logloss,
+            "valid_logloss": self.valid_logloss,
+            "test_logloss": self.test_logloss,
+            "train_auc": self.train_auc,
+            "valid_auc": self.valid_auc,
+            "test_auc": self.test_auc,
+            "best_iteration": self.best_iteration,
+            # サンプル数
+            "num_train_samples": self.num_train_samples,
+            "num_valid_samples": self.num_valid_samples,
+            "num_test_samples": self.num_test_samples,
             "num_features": self.num_features,
+            # 過学習チェック
+            "overfit_gap": self.overfit_gap,
+            "generalization_gap": self.generalization_gap,
+            # その他
             "error": self.error,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
@@ -126,6 +152,8 @@ def start_retraining(
     upload_after_training: bool = False,
     upload_version: Optional[str] = None,
     upload_description: Optional[str] = None,
+    # ターゲット変数の戦略
+    target_strategy: int = 2,
 ) -> dict:
     """
     再学習を開始する
@@ -141,6 +169,7 @@ def start_retraining(
         upload_after_training: 学習完了後にクラウドにアップロードするか
         upload_version: アップロード時のバージョン名
         upload_description: アップロード時の説明
+        target_strategy: ターゲット変数の戦略（0=1着のみ正例, 2=タイム同着も正例）
 
     Returns:
         開始状態
@@ -161,7 +190,8 @@ def start_retraining(
         target=_run_retraining,
         args=(min_date, num_boost_round, early_stopping, valid_fraction,
               use_time_split, train_end_date, valid_end_date,
-              upload_after_training, upload_version, upload_description),
+              upload_after_training, upload_version, upload_description,
+              target_strategy),
         daemon=True,
     )
     thread.start()
@@ -183,6 +213,7 @@ def _run_retraining(
     upload_after_training: bool = False,
     upload_version: Optional[str] = None,
     upload_description: Optional[str] = None,
+    target_strategy: int = 2,
 ) -> None:
     """バックグラウンドで再学習を実行"""
     result = RetrainingResult()
@@ -210,64 +241,104 @@ def _run_retraining(
             "message": f"モデルバージョン: {version}",
         })
 
+        # target_strategy情報を表示
+        strategy_desc = "1着のみ正例" if target_strategy == 0 else "タイム同着も正例（target_mod）"
+        emit_progress("info", {
+            "message": f"ターゲット戦略: {strategy_desc}",
+        })
+        logger.info(f"Target strategy: {target_strategy} ({strategy_desc})")
+
         predictor = HorseRacingPredictor(model_version=version)
 
         if use_time_split and train_end_date and valid_end_date:
-            # 時系列分割モード
+            # 時系列分割モード（Train/Valid/Testの3分割）
             logger.info(f"Using time-split mode: train_end={train_end_date}, valid_end={valid_end_date}")
             emit_progress("info", {
-                "message": f"時系列分割モード: 学習〜{train_end_date}, 検証〜{valid_end_date}",
+                "message": f"時系列分割モード: Train〜{train_end_date}, Valid〜{valid_end_date}, Test〜最新",
             })
+
+            # データ準備中の進捗コールバック
+            def data_progress_callback(phase: str, current: int, total: int, message: str, overall_progress: float):
+                # 全体の5%〜15%をデータ準備に割り当て
+                progress_percent = 5 + int(overall_progress * 10)
+                emit_progress("data_progress", {
+                    "step": "preparing_data",
+                    "phase": phase,
+                    "message": message,
+                    "progress_percent": progress_percent,
+                    "current": current,
+                    "total": total,
+                })
 
             data = prepare_time_split_data(
                 db,
                 train_end_date=train_end_date,
                 valid_end_date=valid_end_date,
                 train_start_date=min_date,
+                progress_callback=data_progress_callback,
+                target_strategy=target_strategy,
             )
 
             X_train, y_train = data['train']
             X_valid, y_valid = data['valid']
+            X_test, y_test = data['test']
 
             if X_train.empty:
                 raise ValueError("No training data found")
             if X_valid.empty:
                 raise ValueError("No validation data found")
 
-            result.num_samples = len(X_train) + len(X_valid)
+            result.num_train_samples = len(X_train)
+            result.num_valid_samples = len(X_valid)
+            result.num_test_samples = len(X_test)
             result.num_features = len(X_train.columns)
 
             emit_progress("step", {
                 "step": "data_ready",
-                "message": f"データ準備完了: 学習{len(X_train)}件, 検証{len(X_valid)}件",
+                "message": f"データ準備完了: Train {len(X_train)}件, Valid {len(X_valid)}件, Test {len(X_test)}件",
                 "progress_percent": 15,
                 "num_train_samples": len(X_train),
                 "num_valid_samples": len(X_valid),
+                "num_test_samples": len(X_test),
                 "num_features": result.num_features,
             })
 
-            logger.info(f"Train: {len(X_train)} samples, Valid: {len(X_valid)} samples, Test: {data['counts']['test']} samples")
+            logger.info(f"Train: {len(X_train)} samples, Valid: {len(X_valid)} samples, Test: {len(X_test)} samples")
 
             with _lock:
                 _retraining_status["progress"] = "training"
 
-            # ステップ2: 学習開始
+            # ステップ2: 学習開始（3分割）
             emit_progress("step", {
                 "step": "training",
-                "message": "モデルを学習中...",
+                "message": "モデルを学習中（Train/Valid/Testの3分割、Early Stopping有効）...",
                 "progress_percent": 20,
             })
 
-            # 時系列分割モードで学習
-            logger.info("Training model with time-split data...")
-            train_result = predictor.train_with_validation(
-                X_train,
-                y_train,
-                X_valid,
-                y_valid,
-                num_boost_round=num_boost_round,
-                early_stopping_rounds=early_stopping,
-            )
+            # 時系列分割モードで学習（テストデータも使用）
+            logger.info("Training model with train/valid/test split...")
+            if X_test.empty:
+                # テストデータがない場合は2分割
+                train_result = predictor.train_with_validation(
+                    X_train,
+                    y_train,
+                    X_valid,
+                    y_valid,
+                    num_boost_round=num_boost_round,
+                    early_stopping_rounds=early_stopping,
+                )
+            else:
+                # 3分割で学習
+                train_result = predictor.train_with_test_split(
+                    X_train,
+                    y_train,
+                    X_valid,
+                    y_valid,
+                    X_test,
+                    y_test,
+                    num_boost_round=num_boost_round,
+                    early_stopping_rounds=early_stopping,
+                )
         else:
             # 従来モード
             logger.info("Using legacy mode (fraction-based split)")
@@ -275,7 +346,7 @@ def _run_retraining(
                 "message": "従来モード（ランダム分割）",
             })
 
-            X, y = prepare_training_data(db, min_date=min_date)
+            X, y = prepare_training_data(db, min_date=min_date, target_strategy=target_strategy)
 
             if X.empty:
                 raise ValueError("No training data found")
@@ -313,20 +384,38 @@ def _run_retraining(
                 valid_fraction=valid_fraction,
             )
 
-        result.train_rmse = train_result["train_rmse"]
-        result.valid_rmse = train_result["valid_rmse"]
+        # 評価指標を結果に設定
+        result.train_logloss = train_result.get("train_logloss")
+        result.valid_logloss = train_result.get("valid_logloss")
+        result.test_logloss = train_result.get("test_logloss")
+        result.train_auc = train_result.get("train_auc")
+        result.valid_auc = train_result.get("valid_auc")
+        result.test_auc = train_result.get("test_auc")
+        result.best_iteration = train_result.get("best_iteration")
+        result.overfit_gap = train_result.get("overfit_gap")
+        result.generalization_gap = train_result.get("generalization_gap")
 
         # ステップ3: 学習完了
+        metrics_msg = f"Train AUC={result.train_auc:.4f}, Valid AUC={result.valid_auc:.4f}"
+        if result.test_auc:
+            metrics_msg += f", Test AUC={result.test_auc:.4f}"
+
         emit_progress("step", {
             "step": "training_done",
-            "message": f"学習完了: Train RMSE={result.train_rmse:.4f}, Valid RMSE={result.valid_rmse:.4f}",
+            "message": f"学習完了: {metrics_msg}",
             "progress_percent": 70,
-            "train_rmse": result.train_rmse,
-            "valid_rmse": result.valid_rmse,
-            "best_iteration": train_result.get("best_iteration"),
+            "train_logloss": result.train_logloss,
+            "valid_logloss": result.valid_logloss,
+            "test_logloss": result.test_logloss,
+            "train_auc": result.train_auc,
+            "valid_auc": result.valid_auc,
+            "test_auc": result.test_auc,
+            "best_iteration": result.best_iteration,
+            "overfit_gap": result.overfit_gap,
+            "generalization_gap": result.generalization_gap,
         })
 
-        logger.info(f"Training completed: train_rmse={result.train_rmse:.4f}, valid_rmse={result.valid_rmse:.4f}")
+        logger.info(f"Training completed: {metrics_msg}, best_iteration={result.best_iteration}")
 
         with _lock:
             _retraining_status["progress"] = "saving"
@@ -378,10 +467,16 @@ def _run_retraining(
                         "version": version,
                         "description": upload_description,
                         "num_features": result.num_features,
-                        "num_samples": result.num_samples,
-                        "train_rmse": result.train_rmse,
-                        "valid_rmse": result.valid_rmse,
-                        "best_iteration": predictor.model.best_iteration if predictor.model else None,
+                        "num_train_samples": result.num_train_samples,
+                        "num_valid_samples": result.num_valid_samples,
+                        "num_test_samples": result.num_test_samples,
+                        "train_logloss": result.train_logloss,
+                        "valid_logloss": result.valid_logloss,
+                        "test_logloss": result.test_logloss,
+                        "train_auc": result.train_auc,
+                        "valid_auc": result.valid_auc,
+                        "test_auc": result.test_auc,
+                        "best_iteration": result.best_iteration,
                         "uploaded_from": "fastapi_local",
                         "trained_at": result.started_at.isoformat() if result.started_at else None,
                     }
@@ -417,10 +512,19 @@ def _run_retraining(
             "message": "再学習が正常に完了しました",
             "progress_percent": 100,
             "version": version,
-            "train_rmse": result.train_rmse,
-            "valid_rmse": result.valid_rmse,
-            "num_samples": result.num_samples,
+            "train_logloss": result.train_logloss,
+            "valid_logloss": result.valid_logloss,
+            "test_logloss": result.test_logloss,
+            "train_auc": result.train_auc,
+            "valid_auc": result.valid_auc,
+            "test_auc": result.test_auc,
+            "best_iteration": result.best_iteration,
+            "num_train_samples": result.num_train_samples,
+            "num_valid_samples": result.num_valid_samples,
+            "num_test_samples": result.num_test_samples,
             "num_features": result.num_features,
+            "overfit_gap": result.overfit_gap,
+            "generalization_gap": result.generalization_gap,
         })
 
         logger.info(f"Retraining completed successfully: {version}")

@@ -668,10 +668,9 @@ _sweep_status = {
 class ThresholdSweepParams(BaseModel):
     """閾値スイープ分析パラメータ"""
     bet_type: str = "tansho"  # "tansho" or "umaren"
-    ev_min: float = 0.8
-    ev_max: float = 2.0
+    ev_min: float = 0.8      # スイープ開始閾値（この値から）
+    ev_max: float = 2.0      # スイープ終了閾値 & フィルタリング上限（この値まで）
     ev_step: float = 0.05
-    max_ev: float = 10.0  # 期待値上限（スイープ中は固定）
     min_probability: float = 0.01
     umaren_top_n: int = 3
     bet_amount: int = 100
@@ -813,8 +812,10 @@ def _run_threshold_sweep(
         total_payout = 0
         bet_count = 0
         hit_count = 0
+        race_count = 0  # 賭けが発生したレース数
 
-        for rd in race_data:
+        for race_idx, rd in enumerate(race_data):
+            race_has_bet = False  # このレースで賭けが発生したか
             df = rd["df"]
             actual_results = rd["actual_results"]
             odds_data = rd["odds_data"]
@@ -831,7 +832,7 @@ def _run_threshold_sweep(
                         continue
 
                     ev = prob * odds
-                    if ev >= ev_threshold and ev <= params.max_ev:
+                    if ev >= ev_threshold and ev <= params.ev_max:
                         actual_rank = actual_results.get(horse_num, 999)
                         is_hit = actual_rank == 1
                         payout = int(odds * params.bet_amount) if is_hit else 0
@@ -841,6 +842,7 @@ def _run_threshold_sweep(
                         bet_count += 1
                         if is_hit:
                             hit_count += 1
+                        race_has_bet = True  # このレースで賭けが発生
 
                         # リターン率を記録（シャープレシオ用）
                         ret = (payout - params.bet_amount) / params.bet_amount
@@ -862,7 +864,7 @@ def _run_threshold_sweep(
 
                     ev = umaren_prob * estimated_odds
 
-                    if ev >= ev_threshold and ev <= params.max_ev:
+                    if ev >= ev_threshold and ev <= params.ev_max:
                         r1 = actual_results.get(num1, 999)
                         r2 = actual_results.get(num2, 999)
                         is_hit = (r1 <= 2 and r2 <= 2)
@@ -873,9 +875,14 @@ def _run_threshold_sweep(
                         bet_count += 1
                         if is_hit:
                             hit_count += 1
+                        race_has_bet = True  # このレースで賭けが発生
 
                         ret = (payout - params.bet_amount) / params.bet_amount
                         returns.append(ret)
+
+            # レースで賭けが発生していたらカウント
+            if race_has_bet:
+                race_count += 1
 
         # 回収率とシャープレシオを計算
         return_rate = (total_payout / total_bet) if total_bet > 0 else 0
@@ -894,6 +901,7 @@ def _run_threshold_sweep(
             "return_rate": round(return_rate, 4),
             "sharpe_ratio": round(sharpe_ratio, 4),
             "bet_count": bet_count,
+            "race_count": race_count,  # 賭けが発生したレース数
             "hit_count": hit_count,
             "hit_rate": round(hit_rate, 4),
             "total_bet": total_bet,
