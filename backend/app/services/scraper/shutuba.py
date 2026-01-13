@@ -185,14 +185,25 @@ class RaceCardScraper(BaseScraper):
             if condition_match:
                 race_data["condition"] = condition_match.group(2)
 
-        # Get grade
+        # Get grade（より具体的なパターンを先に検索）
         race_data_02 = soup.select_one(".RaceData02")
         if race_data_02:
             text = race_data_02.get_text()
-            grade_patterns = ["G1", "G2", "G3", "(L)", "オープン", "3勝", "2勝", "1勝", "新馬", "未勝利"]
+            grade_patterns = [
+                "(G1)", "(G2)", "(G3)", "GI", "GII", "GIII", "G1", "G2", "G3",
+                "(L)", "オープン", "OP",
+                "3勝クラス", "3勝", "1600万下",
+                "2勝クラス", "2勝", "1000万下",
+                "1勝クラス", "1勝", "500万下",
+                "新馬", "未勝利"
+            ]
             for grade in grade_patterns:
                 if grade in text:
-                    race_data["grade"] = grade.replace("(", "").replace(")", "")
+                    # 正規化: カッコ除去、クラス付きを略称に統一
+                    normalized = grade.replace("(", "").replace(")", "")
+                    if "クラス" in normalized:
+                        normalized = normalized.replace("クラス", "")
+                    race_data["grade"] = normalized
                     break
 
         return race_data
