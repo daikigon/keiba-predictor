@@ -648,6 +648,7 @@ export interface ThresholdSweepDataPoint {
   total_bet: number;
   total_payout: number;
   profit: number;
+  race_count?: number;
 }
 
 export interface ThresholdSweepResult {

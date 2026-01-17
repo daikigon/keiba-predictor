@@ -90,10 +90,8 @@ export default function ModelPage() {
   const [versions, setVersions] = useState<ModelVersion[]>([]);
   const [retrainingStatus, setRetrainingStatus] = useState<RetrainingStatus | null>(null);
   const [featureImportance, setFeatureImportance] = useState<FeatureImportance[]>([]);
-  const [simulationStatus, setSimulationStatus] = useState<SimulationStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRetraining, setIsRetraining] = useState(false);
-  const [isSimulating, setIsSimulating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [backendAvailable, setBackendAvailable] = useState(true);
 
@@ -110,38 +108,6 @@ export default function ModelPage() {
     num_boost_round: 3000,
     early_stopping: 100,
   });
-
-  // Simulation parameters (localStorageから復元)
-  const [simParams, setSimParams] = useState(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('simParams');
-      if (saved) {
-        try {
-          return JSON.parse(saved);
-        } catch {}
-      }
-    }
-    return {
-      ev_threshold: 1.0,
-      max_ev: 2.0,  // 期待値上限（PDF推奨値）
-      umaren_ev_threshold: 1.2,
-      umaren_max_ev: 5.0,  // 馬連期待値上限（PDF推奨値）
-      bet_type: 'all' as 'tansho' | 'umaren' | 'all',
-      bet_amount: 100,
-      limit: 200,
-      start_date: '',
-      end_date: '',
-      min_probability: 0.01,  // PDF推奨値: 1%
-      umaren_top_n: 3,  // PDF推奨: 組み合わせ爆発防止
-    };
-  });
-
-  // simParamsが変更されたらlocalStorageに保存
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('simParams', JSON.stringify(simParams));
-    }
-  }, [simParams]);
 
   // ページ読み込み時に保存したモデルバージョンを復元
   const restoreSavedModel = useCallback(async () => {
@@ -162,7 +128,7 @@ export default function ModelPage() {
   const loadData = useCallback(async () => {
     let failedCount = 0;
     try {
-      const [model, vers, status, features, simStatus] = await Promise.all([
+      const [model, vers, status, features] = await Promise.all([
         getCurrentModel().catch(() => {
           failedCount++;
           return null;
@@ -179,14 +145,10 @@ export default function ModelPage() {
           failedCount++;
           return [];
         }),
-        getSimulationStatus().catch(() => {
-          failedCount++;
-          return null;
-        }),
       ]);
 
       // 全てのAPIが失敗した場合はバックエンドが利用不可
-      if (failedCount >= 5) {
+      if (failedCount >= 4) {
         setBackendAvailable(false);
       } else {
         setBackendAvailable(true);
@@ -196,7 +158,6 @@ export default function ModelPage() {
       setVersions(vers);
       setRetrainingStatus(status);
       setFeatureImportance(features);
-      setSimulationStatus(simStatus);
       setError(null);
     } catch {
       setBackendAvailable(false);
@@ -210,19 +171,15 @@ export default function ModelPage() {
     restoreSavedModel();
   }, [loadData, restoreSavedModel]);
 
-  // Poll for status updates during retraining or simulation
+  // Poll for status updates during retraining
   useEffect(() => {
-    if (retrainingStatus?.is_running || simulationStatus?.is_running) {
+    if (retrainingStatus?.is_running) {
       const interval = setInterval(async () => {
         try {
-          const [status, simStatus] = await Promise.all([
-            getRetrainingStatus(),
-            getSimulationStatus(),
-          ]);
+          const status = await getRetrainingStatus();
           setRetrainingStatus(status);
-          setSimulationStatus(simStatus);
 
-          if (!status.is_running && !simStatus.is_running) {
+          if (!status.is_running) {
             loadData();
           }
         } catch (err) {
@@ -232,7 +189,7 @@ export default function ModelPage() {
 
       return () => clearInterval(interval);
     }
-  }, [retrainingStatus?.is_running, simulationStatus?.is_running, loadData]);
+  }, [retrainingStatus?.is_running, loadData]);
 
   const handleRetrain = async () => {
     // バリデーション
@@ -326,61 +283,6 @@ export default function ModelPage() {
     } catch (err) {
       setError('モデルの切り替えに失敗しました');
       console.error(err);
-    }
-  };
-
-  const handleSimulate = async () => {
-    setIsSimulating(true);
-    setError(null);
-    setSimulationStatus({
-      is_running: true,
-      progress: 0,
-      total: 0,
-      results: null,
-      error: null,
-    });
-
-    try {
-      // 空の日付は除外
-      const params = {
-        ...simParams,
-        start_date: simParams.start_date || undefined,
-        end_date: simParams.end_date || undefined,
-      };
-
-      // 非同期シミュレーション開始
-      await startSimulation(params);
-
-      // ポーリングで進捗を監視
-      const pollInterval = setInterval(async () => {
-        try {
-          const status = await getSimulationStatus();
-          setSimulationStatus(status);
-
-          // 完了したらポーリング停止
-          if (!status.is_running) {
-            clearInterval(pollInterval);
-            setIsSimulating(false);
-            if (status.error) {
-              setError(status.error);
-            }
-          }
-        } catch (pollErr) {
-          console.error('Failed to poll simulation status:', pollErr);
-        }
-      }, 500); // 0.5秒ごとにポーリング
-
-    } catch (err) {
-      setError('シミュレーションの開始に失敗しました');
-      console.error(err);
-      setIsSimulating(false);
-      setSimulationStatus({
-        is_running: false,
-        progress: 0,
-        total: 0,
-        results: null,
-        error: null,
-      });
     }
   };
 
@@ -747,268 +649,7 @@ export default function ModelPage() {
       </div>
 
       {/* Simulation Section */}
-      <Card className={cn("mt-6", !backendAvailable && "opacity-60 pointer-events-none")}>
-        <CardHeader>
-          <div className="flex items-center gap-2">
-            <TrendingUp className="w-5 h-5 text-indigo-600" />
-            <CardTitle>期待値シミュレーション</CardTitle>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <div className="grid gap-6 lg:grid-cols-2">
-            {/* Parameters */}
-            <div className="space-y-4">
-              <h4 className="font-medium flex items-center gap-2">
-                <Settings className="w-4 h-4" />
-                パラメータ設定
-              </h4>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">
-                    単勝EV下限
-                  </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    value={simParams.ev_threshold}
-                    onChange={(e) =>
-                      setSimParams({ ...simParams, ev_threshold: parseFloat(e.target.value) })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">
-                    単勝EV上限
-                  </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    value={simParams.max_ev}
-                    onChange={(e) =>
-                      setSimParams({ ...simParams, max_ev: parseFloat(e.target.value) })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">
-                    馬連EV下限
-                  </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    value={simParams.umaren_ev_threshold}
-                    onChange={(e) =>
-                      setSimParams({
-                        ...simParams,
-                        umaren_ev_threshold: parseFloat(e.target.value),
-                      })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">
-                    馬連EV上限
-                  </label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    value={simParams.umaren_max_ev}
-                    onChange={(e) =>
-                      setSimParams({
-                        ...simParams,
-                        umaren_max_ev: parseFloat(e.target.value),
-                      })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">
-                    最低確率 (%)
-                  </label>
-                  <input
-                    type="number"
-                    step="1"
-                    min="0"
-                    max="100"
-                    value={Math.round(simParams.min_probability * 100)}
-                    onChange={(e) =>
-                      setSimParams({
-                        ...simParams,
-                        min_probability: parseFloat(e.target.value) / 100,
-                      })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">
-                    馬連対象馬数
-                  </label>
-                  <input
-                    type="number"
-                    step="1"
-                    min="2"
-                    max="10"
-                    value={simParams.umaren_top_n}
-                    onChange={(e) =>
-                      setSimParams({
-                        ...simParams,
-                        umaren_top_n: parseInt(e.target.value),
-                      })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">
-                    賭け種別
-                  </label>
-                  <select
-                    value={simParams.bet_type}
-                    onChange={(e) =>
-                      setSimParams({
-                        ...simParams,
-                        bet_type: e.target.value as 'tansho' | 'umaren' | 'all',
-                      })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg text-sm"
-                  >
-                    <option value="all">全て</option>
-                    <option value="tansho">単勝のみ</option>
-                    <option value="umaren">馬連のみ</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm text-gray-600 mb-1">
-                    1点賭け金
-                  </label>
-                  <input
-                    type="number"
-                    step="100"
-                    min="100"
-                    value={simParams.bet_amount}
-                    onChange={(e) =>
-                      setSimParams({ ...simParams, bet_amount: parseInt(e.target.value) })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg text-sm"
-                  />
-                </div>
-                <div className="col-span-2">
-                  <label className="block text-sm text-gray-600 mb-1">
-                    対象レース数（上限）
-                  </label>
-                  <input
-                    type="number"
-                    step="50"
-                    min="10"
-                    max="1000"
-                    value={simParams.limit}
-                    onChange={(e) =>
-                      setSimParams({ ...simParams, limit: parseInt(e.target.value) })
-                    }
-                    className="w-full px-3 py-2 border rounded-lg text-sm"
-                  />
-                </div>
-              </div>
-
-              {/* 期間指定 */}
-              <div className="pt-3 border-t">
-                <h5 className="text-sm font-medium text-gray-700 mb-2">
-                  テスト期間（データリーク防止用）
-                </h5>
-                <p className="text-xs text-gray-500 mb-3">
-                  学習に使っていない期間を指定することで、正確な回収率を確認できます
-                </p>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">
-                      開始日
-                    </label>
-                    <input
-                      type="date"
-                      value={simParams.start_date}
-                      onChange={(e) =>
-                        setSimParams({ ...simParams, start_date: e.target.value })
-                      }
-                      className="w-full px-3 py-2 border rounded-lg text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm text-gray-600 mb-1">
-                      終了日
-                    </label>
-                    <input
-                      type="date"
-                      value={simParams.end_date}
-                      onChange={(e) =>
-                        setSimParams({ ...simParams, end_date: e.target.value })
-                      }
-                      className="w-full px-3 py-2 border rounded-lg text-sm"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <Button
-                onClick={handleSimulate}
-                isLoading={isSimulating || simulationStatus?.is_running}
-                disabled={simulationStatus?.is_running}
-                className="w-full"
-              >
-                <Play className="w-4 h-4 mr-2" />
-                シミュレーション実行
-              </Button>
-            </div>
-
-            {/* Results */}
-            <div>
-              <h4 className="font-medium mb-4">結果</h4>
-
-              {simulationStatus?.is_running ? (
-                <div className="space-y-3">
-                  <div className="flex items-center gap-2 text-blue-600">
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>
-                      シミュレーション中... ({simulationStatus.progress}/{simulationStatus.total})
-                    </span>
-                  </div>
-                  <div className="w-full bg-gray-200 rounded-full h-2">
-                    <div
-                      className="bg-blue-600 h-2 rounded-full transition-all"
-                      style={{
-                        width: `${
-                          simulationStatus.total > 0
-                            ? (simulationStatus.progress / simulationStatus.total) * 100
-                            : 0
-                        }%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              ) : simulationStatus?.results ? (
-                <SimulationResultCard results={simulationStatus.results} />
-              ) : simulationStatus?.error ? (
-                <div className="text-red-600 p-4 bg-red-50 rounded-lg">
-                  {simulationStatus.error}
-                </div>
-              ) : (
-                <p className="text-gray-500 text-center py-8">
-                  シミュレーションを実行してください
-                </p>
-              )}
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+      <SimulationSection backendAvailable={backendAvailable} />
 
       {/* Threshold Sweep Analysis Section */}
       <ThresholdSweepSection backendAvailable={backendAvailable} />
@@ -1016,7 +657,461 @@ export default function ModelPage() {
   );
 }
 
-// 履歴エントリの型
+// シミュレーション履歴エントリの型
+interface SimulationHistoryEntry {
+  id: string;
+  timestamp: string;
+  params: {
+    ev_threshold: number;
+    max_ev: number;
+    umaren_ev_threshold: number;
+    umaren_max_ev: number;
+    bet_type: string;
+    limit: number;
+  };
+  result: SimulationResult;
+}
+
+const SIMULATION_HISTORY_KEY = 'simulation_history';
+const MAX_SIMULATION_HISTORY = 5;
+
+function SimulationSection({ backendAvailable }: { backendAvailable: boolean }) {
+  const [simulationStatus, setSimulationStatus] = useState<SimulationStatus | null>(null);
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [history, setHistory] = useState<SimulationHistoryEntry[]>([]);
+  const [selectedHistoryId, setSelectedHistoryId] = useState<string>('');
+  const [displayResult, setDisplayResult] = useState<SimulationResult | null>(null);
+
+  // Simulation parameters (localStorageから復元)
+  const [simParams, setSimParams] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('simParams');
+      if (saved) {
+        try {
+          return JSON.parse(saved);
+        } catch {}
+      }
+    }
+    return {
+      ev_threshold: 1.0,
+      max_ev: 2.0,
+      umaren_ev_threshold: 1.2,
+      umaren_max_ev: 5.0,
+      bet_type: 'all' as 'tansho' | 'umaren' | 'all',
+      bet_amount: 100,
+      limit: 200,
+      start_date: '',
+      end_date: '',
+      min_probability: 0.01,
+      umaren_top_n: 3,
+    };
+  });
+
+  // simParamsが変更されたらlocalStorageに保存
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('simParams', JSON.stringify(simParams));
+    }
+  }, [simParams]);
+
+  // 履歴をlocalStorageから読み込み
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem(SIMULATION_HISTORY_KEY);
+      if (saved) {
+        try {
+          setHistory(JSON.parse(saved));
+        } catch {}
+      }
+    }
+  }, []);
+
+  // 履歴に保存
+  const saveToHistory = (result: SimulationResult) => {
+    const entry: SimulationHistoryEntry = {
+      id: Date.now().toString(),
+      timestamp: new Date().toLocaleString('ja-JP'),
+      params: {
+        ev_threshold: simParams.ev_threshold,
+        max_ev: simParams.max_ev,
+        umaren_ev_threshold: simParams.umaren_ev_threshold,
+        umaren_max_ev: simParams.umaren_max_ev,
+        bet_type: simParams.bet_type,
+        limit: simParams.limit,
+      },
+      result,
+    };
+
+    const newHistory = [entry, ...history].slice(0, MAX_SIMULATION_HISTORY);
+    setHistory(newHistory);
+    localStorage.setItem(SIMULATION_HISTORY_KEY, JSON.stringify(newHistory));
+  };
+
+  // 履歴選択時
+  const handleSelectHistory = (id: string) => {
+    setSelectedHistoryId(id);
+    if (id === '') {
+      // 現在の結果を表示
+      setDisplayResult(simulationStatus?.results || null);
+      return;
+    }
+    const entry = history.find((h) => h.id === id);
+    if (entry) {
+      setDisplayResult(entry.result);
+    }
+  };
+
+  const handleSimulate = async () => {
+    setIsSimulating(true);
+    setError(null);
+    setSelectedHistoryId('');
+    setDisplayResult(null);
+    setSimulationStatus({
+      is_running: true,
+      progress: 0,
+      total: 0,
+      results: null,
+      error: null,
+    });
+
+    try {
+      // 空の日付は除外
+      const params = {
+        ...simParams,
+        start_date: simParams.start_date || undefined,
+        end_date: simParams.end_date || undefined,
+      };
+
+      // 非同期シミュレーション開始
+      await startSimulation(params);
+
+      // ポーリングで進捗を監視
+      const pollInterval = setInterval(async () => {
+        try {
+          const status = await getSimulationStatus();
+          setSimulationStatus(status);
+
+          // 完了したらポーリング停止
+          if (!status.is_running) {
+            clearInterval(pollInterval);
+            setIsSimulating(false);
+            if (status.error) {
+              setError(status.error);
+            } else if (status.results) {
+              setDisplayResult(status.results);
+              // 履歴に保存
+              saveToHistory(status.results);
+            }
+          }
+        } catch (pollErr) {
+          console.error('Failed to poll simulation status:', pollErr);
+        }
+      }, 500);
+
+    } catch (err) {
+      setError('シミュレーションの開始に失敗しました');
+      console.error(err);
+      setIsSimulating(false);
+      setSimulationStatus({
+        is_running: false,
+        progress: 0,
+        total: 0,
+        results: null,
+        error: null,
+      });
+    }
+  };
+
+  return (
+    <Card className={cn("mt-6", !backendAvailable && "opacity-60 pointer-events-none")}>
+      <CardHeader>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <TrendingUp className="w-5 h-5 text-indigo-600" />
+            <CardTitle>期待値シミュレーション</CardTitle>
+          </div>
+          {/* 履歴セレクター */}
+          {history.length > 0 && (
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-gray-400" />
+              <select
+                value={selectedHistoryId}
+                onChange={(e) => handleSelectHistory(e.target.value)}
+                className="text-sm border rounded-lg px-2 py-1 bg-white"
+              >
+                <option value="">-- 履歴を選択 --</option>
+                {history.map((h) => (
+                  <option key={h.id} value={h.id}>
+                    {h.timestamp} ({h.params.bet_type === 'all' ? '全て' : h.params.bet_type === 'tansho' ? '単勝' : '馬連'}, EV {h.params.ev_threshold}~{h.params.max_ev})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-6 lg:grid-cols-2">
+          {/* Parameters */}
+          <div className="space-y-4">
+            <h4 className="font-medium flex items-center gap-2">
+              <Settings className="w-4 h-4" />
+              パラメータ設定
+            </h4>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  単勝EV下限
+                </label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={simParams.ev_threshold}
+                  onChange={(e) =>
+                    setSimParams({ ...simParams, ev_threshold: parseFloat(e.target.value) })
+                  }
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  単勝EV上限
+                </label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={simParams.max_ev}
+                  onChange={(e) =>
+                    setSimParams({ ...simParams, max_ev: parseFloat(e.target.value) })
+                  }
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  馬連EV下限
+                </label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={simParams.umaren_ev_threshold}
+                  onChange={(e) =>
+                    setSimParams({
+                      ...simParams,
+                      umaren_ev_threshold: parseFloat(e.target.value),
+                    })
+                  }
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  馬連EV上限
+                </label>
+                <input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={simParams.umaren_max_ev}
+                  onChange={(e) =>
+                    setSimParams({
+                      ...simParams,
+                      umaren_max_ev: parseFloat(e.target.value),
+                    })
+                  }
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  最低確率 (%)
+                </label>
+                <input
+                  type="number"
+                  step="1"
+                  min="0"
+                  max="100"
+                  value={Math.round(simParams.min_probability * 100)}
+                  onChange={(e) =>
+                    setSimParams({
+                      ...simParams,
+                      min_probability: parseFloat(e.target.value) / 100,
+                    })
+                  }
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  馬連対象馬数
+                </label>
+                <input
+                  type="number"
+                  step="1"
+                  min="2"
+                  max="10"
+                  value={simParams.umaren_top_n}
+                  onChange={(e) =>
+                    setSimParams({
+                      ...simParams,
+                      umaren_top_n: parseInt(e.target.value),
+                    })
+                  }
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  賭け種別
+                </label>
+                <select
+                  value={simParams.bet_type}
+                  onChange={(e) =>
+                    setSimParams({
+                      ...simParams,
+                      bet_type: e.target.value as 'tansho' | 'umaren' | 'all',
+                    })
+                  }
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                >
+                  <option value="all">全て</option>
+                  <option value="tansho">単勝のみ</option>
+                  <option value="umaren">馬連のみ</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">
+                  1点賭け金
+                </label>
+                <input
+                  type="number"
+                  step="100"
+                  min="100"
+                  value={simParams.bet_amount}
+                  onChange={(e) =>
+                    setSimParams({ ...simParams, bet_amount: parseInt(e.target.value) })
+                  }
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-sm text-gray-600 mb-1">
+                  対象レース数（上限）
+                </label>
+                <input
+                  type="number"
+                  step="50"
+                  min="10"
+                  max="1000"
+                  value={simParams.limit}
+                  onChange={(e) =>
+                    setSimParams({ ...simParams, limit: parseInt(e.target.value) })
+                  }
+                  className="w-full px-3 py-2 border rounded-lg text-sm"
+                />
+              </div>
+            </div>
+
+            {/* 期間指定 */}
+            <div className="pt-3 border-t">
+              <h5 className="text-sm font-medium text-gray-700 mb-2">
+                テスト期間（データリーク防止用）
+              </h5>
+              <p className="text-xs text-gray-500 mb-3">
+                学習に使っていない期間を指定することで、正確な回収率を確認できます
+              </p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">
+                    開始日
+                  </label>
+                  <input
+                    type="date"
+                    value={simParams.start_date}
+                    onChange={(e) =>
+                      setSimParams({ ...simParams, start_date: e.target.value })
+                    }
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-gray-600 mb-1">
+                    終了日
+                  </label>
+                  <input
+                    type="date"
+                    value={simParams.end_date}
+                    onChange={(e) =>
+                      setSimParams({ ...simParams, end_date: e.target.value })
+                    }
+                    className="w-full px-3 py-2 border rounded-lg text-sm"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <Button
+              onClick={handleSimulate}
+              isLoading={isSimulating || simulationStatus?.is_running}
+              disabled={simulationStatus?.is_running}
+              className="w-full"
+            >
+              <Play className="w-4 h-4 mr-2" />
+              シミュレーション実行
+            </Button>
+          </div>
+
+          {/* Results */}
+          <div>
+            <h4 className="font-medium mb-4">結果</h4>
+
+            {error && (
+              <div className="text-red-600 p-4 bg-red-50 rounded-lg mb-4">
+                {error}
+              </div>
+            )}
+
+            {simulationStatus?.is_running ? (
+              <div className="space-y-3">
+                <div className="flex items-center gap-2 text-blue-600">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>
+                    シミュレーション中... ({simulationStatus.progress}/{simulationStatus.total})
+                  </span>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-2">
+                  <div
+                    className="bg-blue-600 h-2 rounded-full transition-all"
+                    style={{
+                      width: `${
+                        simulationStatus.total > 0
+                          ? (simulationStatus.progress / simulationStatus.total) * 100
+                          : 0
+                      }%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : displayResult ? (
+              <SimulationResultCard results={displayResult} />
+            ) : (
+              <p className="text-gray-500 text-center py-8">
+                シミュレーションを実行してください
+              </p>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// 閾値スイープ履歴エントリの型
 interface SweepHistoryEntry {
   id: string;
   timestamp: string;
@@ -1025,6 +1120,7 @@ interface SweepHistoryEntry {
     ev_min: number;
     ev_max: number;
     limit: number;
+    min_probability?: number;
   };
   result: ThresholdSweepResult;
 }
@@ -1044,6 +1140,7 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
     ev_min: 0.8,
     ev_max: 2.0,
     ev_step: 0.05,
+    min_probability: 0.05,  // 期待値シミュレーションと同じデフォルト値
     limit: 500,
     start_date: '',
     end_date: '',
@@ -1071,6 +1168,7 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
         ev_min: sweepParams.ev_min,
         ev_max: sweepParams.ev_max,
         limit: sweepParams.limit,
+        min_probability: sweepParams.min_probability,
       },
       result,
     };
@@ -1164,7 +1262,7 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
                 <option value="">-- 履歴を選択 --</option>
                 {history.map((h) => (
                   <option key={h.id} value={h.id}>
-                    {h.timestamp} ({h.params.bet_type === 'tansho' ? '単勝' : '馬連'}, EV {h.params.ev_min}~{h.params.ev_max})
+                    {h.timestamp} ({h.params.bet_type === 'tansho' ? '単勝' : '馬連'}, EV {h.params.ev_min}~{h.params.ev_max}, 確率≥{h.params.min_probability ? Math.round(h.params.min_probability * 100) : 1}%)
                   </option>
                 ))}
               </select>
@@ -1221,6 +1319,24 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
                 value={sweepParams.limit}
                 onChange={(e) =>
                   setSweepParams({ ...sweepParams, limit: parseInt(e.target.value) })
+                }
+                className="w-full px-3 py-2 border rounded-lg text-sm"
+              />
+            </div>
+          </div>
+
+          {/* 最低確率 */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">最低確率 (%)</label>
+              <input
+                type="number"
+                step="1"
+                min="0"
+                max="100"
+                value={Math.round(sweepParams.min_probability * 100)}
+                onChange={(e) =>
+                  setSweepParams({ ...sweepParams, min_probability: parseFloat(e.target.value) / 100 })
                 }
                 className="w-full px-3 py-2 border rounded-lg text-sm"
               />
@@ -1337,7 +1453,8 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
                       tick={{ fontSize: 12 }}
                     />
                     <Tooltip
-                      formatter={(value: number, name: string) => {
+                      formatter={(value, name) => {
+                        if (typeof value !== 'number') return value;
                         if (name === '回収率') return `${value.toFixed(1)}%`;
                         if (name === 'シャープレシオ') return value.toFixed(3);
                         return value;
