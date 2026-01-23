@@ -61,7 +61,8 @@ def is_storage_available() -> bool:
 def upload_model(
     model_data: Dict[str, Any],
     version: str,
-    metadata: Optional[Dict] = None
+    metadata: Optional[Dict] = None,
+    race_type: str = "central"
 ) -> Dict[str, Any]:
     """
     モデルを Supabase Storage にアップロード
@@ -70,6 +71,7 @@ def upload_model(
         model_data: pickle化するモデルデータ
         version: モデルバージョン (例: "v1", "v2")
         metadata: 追加のメタデータ
+        race_type: レースタイプ (central/local/banei)
 
     Returns:
         アップロード結果
@@ -79,7 +81,11 @@ def upload_model(
         raise RuntimeError("Supabase not configured")
 
     bucket = settings.SUPABASE_MODEL_BUCKET
-    filename = f"model_{version}.pkl"
+    # race_typeに応じたファイル名
+    if race_type == "central":
+        filename = f"model_{version}.pkl"
+    else:
+        filename = f"model_{race_type}_{version}.pkl"
 
     try:
         # モデルをバイト列に変換
@@ -99,7 +105,10 @@ def upload_model(
 
         # メタデータを別ファイルとして保存
         if metadata:
-            meta_filename = f"model_{version}_meta.json"
+            if race_type == "central":
+                meta_filename = f"model_{version}_meta.json"
+            else:
+                meta_filename = f"model_{race_type}_{version}_meta.json"
             import json
             meta_bytes = json.dumps(metadata, ensure_ascii=False, default=str).encode()
             client.storage.from_(bucket).upload(

@@ -1066,6 +1066,7 @@ class UploadModelParams(BaseModel):
     """モデルアップロードパラメータ"""
     version: str = "v1"
     description: Optional[str] = None
+    race_type: str = DEFAULT_RACE_TYPE
 
 
 @router.post("/storage/upload")
@@ -1082,12 +1083,17 @@ async def upload_model_to_cloud(params: UploadModelParams):
             detail="Supabase Storage is not configured or unavailable"
         )
 
-    # 現在のモデルを取得
-    predictor = prediction_service.get_predictor()
+    # race_typeのバリデーション
+    race_type = params.race_type
+    if race_type not in RACE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid race_type: {race_type}. Must be one of {RACE_TYPES}")
+
+    # 指定されたrace_typeのモデルを取得
+    predictor = prediction_service.get_predictor(race_type)
     if predictor.model is None:
         raise HTTPException(
             status_code=404,
-            detail="No model is currently loaded. Train or load a model first."
+            detail=f"No model is currently loaded for {race_type}. Train or load a model first."
         )
 
     try:
@@ -1104,13 +1110,14 @@ async def upload_model_to_cloud(params: UploadModelParams):
         metadata = {
             "version": params.version,
             "description": params.description,
+            "race_type": race_type,
             "num_features": len(predictor.feature_columns),
             "best_iteration": predictor.model.best_iteration if predictor.model else None,
             "uploaded_from": "fastapi_local",
         }
 
         # アップロード
-        result = storage_service.upload_model(model_data, params.version, metadata)
+        result = storage_service.upload_model(model_data, params.version, metadata, race_type)
 
         logger.info(f"Model uploaded to cloud: {params.version}")
 
