@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import {
@@ -53,22 +53,25 @@ interface ScrapeHistory {
   mode: ScrapeMode;
 }
 
-const HISTORY_KEY = 'scrape_history';
 const MAX_HISTORY = 5;
 
-function loadHistory(): ScrapeHistory[] {
+function getHistoryKey(raceType: string): string {
+  return `scrape_history_${raceType}`;
+}
+
+function loadHistory(raceType: string): ScrapeHistory[] {
   if (typeof window === 'undefined') return [];
   try {
-    const saved = localStorage.getItem(HISTORY_KEY);
+    const saved = localStorage.getItem(getHistoryKey(raceType));
     return saved ? JSON.parse(saved) : [];
   } catch {
     return [];
   }
 }
 
-function saveHistory(history: ScrapeHistory[]) {
+function saveHistory(history: ScrapeHistory[], raceType: string) {
   if (typeof window === 'undefined') return;
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, MAX_HISTORY)));
+  localStorage.setItem(getHistoryKey(raceType), JSON.stringify(history.slice(0, MAX_HISTORY)));
 }
 
 function getDateRange(startDate: string, endDate: string): string[] {
@@ -82,7 +85,11 @@ function getDateRange(startDate: string, endDate: string): string[] {
   return dates;
 }
 
-export function ScrapeForm() {
+interface ScrapeFormProps {
+  raceType?: 'central' | 'local' | 'banei';
+}
+
+export function ScrapeForm({ raceType = 'central' }: ScrapeFormProps) {
   const [targetDate, setTargetDate] = useState(() => {
     const today = new Date();
     return today.toISOString().split('T')[0];
@@ -93,7 +100,6 @@ export function ScrapeForm() {
   });
   const [mode, setMode] = useState<ScrapeMode>('today');
   const [dateMode, setDateMode] = useState<DateMode>('single');
-  const [jraOnly, setJraOnly] = useState(false);
   const [forceOverwrite, setForceOverwrite] = useState(false);
   const [status, setStatus] = useState<ScrapeStatus>('idle');
   const [progress, setProgress] = useState<ScrapeProgress | null>(null);
@@ -107,7 +113,7 @@ export function ScrapeForm() {
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSkippedList, setShowSkippedList] = useState(false);
-  const [history, setHistory] = useState<ScrapeHistory[]>(() => loadHistory());
+  const [history, setHistory] = useState<ScrapeHistory[]>(() => loadHistory(raceType));
 
   const addToHistory = (entry: ScrapeHistory) => {
     const newHistory = [
@@ -115,13 +121,18 @@ export function ScrapeForm() {
       ...history.filter(h => !(h.date === entry.date && h.mode === entry.mode)),
     ].slice(0, MAX_HISTORY);
     setHistory(newHistory);
-    saveHistory(newHistory);
+    saveHistory(newHistory, raceType);
   };
 
   const clearHistory = () => {
     setHistory([]);
-    localStorage.removeItem(HISTORY_KEY);
+    localStorage.removeItem(getHistoryKey(raceType));
   };
+
+  // Reload history when raceType changes
+  useEffect(() => {
+    setHistory(loadHistory(raceType));
+  }, [raceType]);
 
   const handleScrape = async () => {
     setStatus('scraping_list');
@@ -162,7 +173,7 @@ export function ScrapeForm() {
           currentDateIndex: dateIndex + 1,
         });
 
-        const listResult = await scrapeList(currentDate, jraOnly);
+        const listResult = await scrapeList(currentDate, false, raceType);
 
         if (listResult.races_count === 0) {
           // No races for this date, continue to next
@@ -246,10 +257,19 @@ export function ScrapeForm() {
       const [start, end] = dateStr.split('~');
       const startDate = new Date(start);
       const endDate = new Date(end);
-      return `${startDate.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' })}~${endDate.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' })}`;
+      const startYear = startDate.getFullYear();
+      const endYear = endDate.getFullYear();
+      const startStr = startDate.toLocaleDateString('ja-JP', { year: 'numeric', month: 'short', day: 'numeric' });
+      // If same year, only show year once at the start
+      if (startYear === endYear) {
+        const endStr = endDate.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
+        return `${startStr}~${endStr}`;
+      }
+      const endStr = endDate.toLocaleDateString('ja-JP', { year: 'numeric', month: 'short', day: 'numeric' });
+      return `${startStr}~${endStr}`;
     }
     const date = new Date(dateStr);
-    return date.toLocaleDateString('ja-JP', { month: 'short', day: 'numeric' });
+    return date.toLocaleDateString('ja-JP', { year: 'numeric', month: 'short', day: 'numeric' });
   };
 
   const formatDateTime = (isoStr: string) => {
@@ -368,21 +388,6 @@ export function ScrapeForm() {
                 />
               </div>
             )}
-          </div>
-
-          {/* JRA Only Option */}
-          <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              id="jra-only"
-              checked={jraOnly}
-              onChange={(e) => setJraOnly(e.target.checked)}
-              disabled={isLoading}
-              className="h-4 w-4 text-green-600 border-gray-300 rounded focus:ring-green-500 disabled:opacity-50"
-            />
-            <label htmlFor="jra-only" className="text-sm text-gray-700">
-              中央競馬のみ取得（地方競馬を除外）
-            </label>
           </div>
 
           {/* Force Overwrite Option */}

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.jockey import Jockey
-from app.models.race import Entry
+from app.models.race import Entry, Race
 from app.services.scraper.jockey import JockeyScraper
 
 router = APIRouter()
@@ -16,6 +16,7 @@ router = APIRouter()
 @router.get("")
 async def get_jockeys(
     search: Optional[str] = Query(None, description="Search by name"),
+    race_type: Optional[str] = Query(None, description="Filter by race type (central/local/banei)"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -26,13 +27,27 @@ async def get_jockeys(
     if search:
         query = query.filter(Jockey.name.contains(search))
 
+    # Filter by race_type: only jockeys that have entries in races of this type
+    if race_type:
+        query = query.filter(
+            Jockey.jockey_id.in_(
+                db.query(Entry.jockey_id)
+                .join(Race, Entry.race_id == Race.race_id)
+                .filter(Race.race_type == race_type)
+                .distinct()
+            )
+        )
+
     total = query.count()
     jockeys = query.order_by(Jockey.name).offset(offset).limit(limit).all()
 
-    # Get entry counts for each jockey
+    # Get entry counts for each jockey (filtered by race_type if specified)
     result = []
     for j in jockeys:
-        entries_count = db.query(Entry).filter(Entry.jockey_id == j.jockey_id).count()
+        entry_query = db.query(Entry).filter(Entry.jockey_id == j.jockey_id)
+        if race_type:
+            entry_query = entry_query.join(Race, Entry.race_id == Race.race_id).filter(Race.race_type == race_type)
+        entries_count = entry_query.count()
 
         # Calculate win stats from entries
         wins = db.query(Entry).filter(

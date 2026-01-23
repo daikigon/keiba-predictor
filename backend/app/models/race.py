@@ -16,6 +16,9 @@ class Race(Base):
     __tablename__ = "races"
 
     race_id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    race_type: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="central", index=True
+    )  # "central", "local", "banei"
     date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
     course: Mapped[str] = mapped_column(String(10), nullable=False)
     race_number: Mapped[int] = mapped_column(Integer, nullable=False)

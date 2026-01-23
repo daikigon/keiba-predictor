@@ -148,6 +148,7 @@ async def get_accuracy_stats(
 
 @router.get("/scrape")
 async def get_scrape_status(
+    race_type: Optional[str] = Query(None, description="Race type: central, local, banei"),
     db: Session = Depends(get_db),
 ):
     """Get scraping status and data counts"""
@@ -155,36 +156,82 @@ async def get_scrape_status(
     from app.models.jockey import Jockey
     from datetime import date
 
-    # Get counts
-    total_races = db.execute(select(func.count(Race.race_id))).scalar() or 0
-    total_horses = db.execute(select(func.count(Horse.horse_id))).scalar() or 0
-    total_jockeys = db.execute(select(func.count(Jockey.jockey_id))).scalar() or 0
-    total_entries = db.execute(select(func.count(Entry.id))).scalar() or 0
-    total_predictions = db.execute(select(func.count(Prediction.id))).scalar() or 0
+    # Build base queries with optional race_type filter
+    race_filter = Race.race_type == race_type if race_type else True
+
+    # Get counts - races filtered by race_type
+    total_races = db.execute(
+        select(func.count(Race.race_id)).where(race_filter)
+    ).scalar() or 0
+
+    # Get entries count for races of this type
+    if race_type:
+        total_entries = db.execute(
+            select(func.count(Entry.id))
+            .join(Race, Entry.race_id == Race.race_id)
+            .where(Race.race_type == race_type)
+        ).scalar() or 0
+    else:
+        total_entries = db.execute(select(func.count(Entry.id))).scalar() or 0
+
+    # Horses and jockeys filtered by race_type (those who have entries in races of that type)
+    if race_type:
+        # Get unique horses that have entries in races of this type
+        total_horses = db.execute(
+            select(func.count(func.distinct(Entry.horse_id)))
+            .join(Race, Entry.race_id == Race.race_id)
+            .where(Race.race_type == race_type)
+        ).scalar() or 0
+
+        # Get unique jockeys that have entries in races of this type
+        total_jockeys = db.execute(
+            select(func.count(func.distinct(Entry.jockey_id)))
+            .join(Race, Entry.race_id == Race.race_id)
+            .where(Race.race_type == race_type)
+            .where(Entry.jockey_id.isnot(None))
+        ).scalar() or 0
+    else:
+        total_horses = db.execute(select(func.count(Horse.horse_id))).scalar() or 0
+        total_jockeys = db.execute(select(func.count(Jockey.jockey_id))).scalar() or 0
+
+    # Predictions filtered by race_type
+    if race_type:
+        total_predictions = db.execute(
+            select(func.count(Prediction.id))
+            .join(Race, Prediction.race_id == Race.race_id)
+            .where(Race.race_type == race_type)
+        ).scalar() or 0
+    else:
+        total_predictions = db.execute(select(func.count(Prediction.id))).scalar() or 0
 
     # Get today's races count
     today = date.today()
-    today_races = db.execute(
-        select(func.count(Race.race_id)).where(Race.date == today)
-    ).scalar() or 0
+    today_query = select(func.count(Race.race_id)).where(Race.date == today)
+    if race_type:
+        today_query = today_query.where(Race.race_type == race_type)
+    today_races = db.execute(today_query).scalar() or 0
 
     # Get last update time (most recent race update)
-    last_updated_result = db.execute(
-        select(Race.updated_at).order_by(Race.updated_at.desc()).limit(1)
-    ).scalar()
+    last_updated_query = select(Race.updated_at).order_by(Race.updated_at.desc())
+    if race_type:
+        last_updated_query = last_updated_query.where(Race.race_type == race_type)
+    last_updated_result = db.execute(last_updated_query.limit(1)).scalar()
 
     last_updated = last_updated_result.isoformat() if last_updated_result else None
 
     # Get date range
-    oldest_race = db.execute(
-        select(Race.date).order_by(Race.date.asc()).limit(1)
-    ).scalar()
-    newest_race = db.execute(
-        select(Race.date).order_by(Race.date.desc()).limit(1)
-    ).scalar()
+    oldest_query = select(Race.date).order_by(Race.date.asc())
+    newest_query = select(Race.date).order_by(Race.date.desc())
+    if race_type:
+        oldest_query = oldest_query.where(Race.race_type == race_type)
+        newest_query = newest_query.where(Race.race_type == race_type)
+
+    oldest_race = db.execute(oldest_query.limit(1)).scalar()
+    newest_race = db.execute(newest_query.limit(1)).scalar()
 
     return {
         "status": "ready",
+        "race_type": race_type,
         "last_updated": last_updated,
         "counts": {
             "total_races": total_races,

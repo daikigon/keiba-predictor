@@ -15,6 +15,7 @@ router = APIRouter()
 async def get_races(
     target_date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format"),
     course: Optional[str] = Query(None, description="Course name"),
+    race_type: Optional[str] = Query(None, description="Race type: central, local, banei"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -28,7 +29,7 @@ async def get_races(
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
     total, races = race_service.get_races_by_date(
-        db, target_date=parsed_date, course=course, limit=limit, offset=offset
+        db, target_date=parsed_date, course=course, race_type=race_type, limit=limit, offset=offset
     )
 
     return {
@@ -36,6 +37,7 @@ async def get_races(
         "races": [
             {
                 "race_id": r.race_id,
+                "race_type": r.race_type,
                 "date": r.date.isoformat(),
                 "course": r.course,
                 "race_number": r.race_number,
@@ -61,6 +63,7 @@ async def get_race(
 
     return {
         "race_id": race.race_id,
+        "race_type": race.race_type,
         "date": race.date.isoformat(),
         "course": race.course,
         "race_number": race.race_number,
@@ -93,7 +96,8 @@ async def get_race(
 async def scrape_races(
     target_date: str = Query(..., description="Date in YYYY-MM-DD format"),
     save_to_db: bool = Query(False, description="Save to database"),
-    jra_only: bool = Query(False, description="Only scrape JRA (central racing) races"),
+    jra_only: bool = Query(False, description="Only scrape JRA (central racing) races (deprecated, use race_type)"),
+    race_type: Optional[str] = Query(None, description="Filter by race type: central, local, banei"),
     db: Session = Depends(get_db),
 ):
     """Scrape races for a given date"""
@@ -103,7 +107,7 @@ async def scrape_races(
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
     scraper = RaceListScraper()
-    races = scraper.scrape(parsed_date, jra_only=jra_only)
+    races = scraper.scrape(parsed_date, jra_only=jra_only, race_type=race_type)
 
     saved_count = 0
     if save_to_db:
@@ -172,7 +176,8 @@ async def scrape_race_detail(
 async def scrape_race_cards(
     target_date: str = Query(..., description="Date in YYYY-MM-DD format"),
     save_to_db: bool = Query(True, description="Save to database"),
-    jra_only: bool = Query(False, description="Only scrape JRA (central racing) races"),
+    jra_only: bool = Query(False, description="Only scrape JRA (central racing) races (deprecated, use race_type)"),
+    race_type: Optional[str] = Query(None, description="Filter by race type: central, local, banei"),
     db: Session = Depends(get_db),
 ):
     """Scrape race cards (出馬表) from race.netkeiba.com for today/upcoming races"""
@@ -182,7 +187,7 @@ async def scrape_race_cards(
         raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
 
     scraper = RaceCardListScraper()
-    races = scraper.scrape(parsed_date, jra_only=jra_only)
+    races = scraper.scrape(parsed_date, jra_only=jra_only, race_type=race_type)
 
     saved_count = 0
     if save_to_db:

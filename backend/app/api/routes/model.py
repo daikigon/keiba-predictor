@@ -22,6 +22,7 @@ from app.logging_config import get_logger
 from app.models import Race, Entry
 from app.services import retraining_service, prediction_service
 from app.services.predictor import FeatureExtractor, get_model
+from app.services.predictor.model import list_model_versions as list_versions_by_type, DEFAULT_RACE_TYPE, RACE_TYPES
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -47,6 +48,8 @@ class RetrainParams(BaseModel):
     use_time_split: bool = True  # デフォルトで時系列分割を使用
     train_end_date: Optional[str] = None
     valid_end_date: Optional[str] = None
+    # レースタイプ（central, local, banei）
+    race_type: str = DEFAULT_RACE_TYPE
 
 
 @router.post("/retrain")
@@ -94,8 +97,13 @@ async def retrain_model(params: RetrainParams):
                 detail="train_end_date must be before valid_end_date"
             )
 
+    # race_typeのバリデーション
+    race_type = params.race_type
+    if race_type not in RACE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid race_type: {race_type}. Must be one of {RACE_TYPES}")
+
     logger.info(f"Starting retraining: use_time_split={params.use_time_split}, "
-                f"train_end={params.train_end_date}, valid_end={params.valid_end_date}")
+                f"train_end={params.train_end_date}, valid_end={params.valid_end_date}, race_type={race_type}")
 
     result = retraining_service.start_retraining(
         min_date=parsed_min_date,
@@ -105,6 +113,7 @@ async def retrain_model(params: RetrainParams):
         use_time_split=params.use_time_split,
         train_end_date=parsed_train_end,
         valid_end_date=parsed_valid_end,
+        race_type=race_type,
     )
 
     if result["status"] == "already_running":
@@ -203,29 +212,44 @@ async def stream_retraining_status():
 
 
 @router.get("/versions")
-async def list_model_versions():
+async def list_model_versions(
+    race_type: str = Query(DEFAULT_RACE_TYPE, description="Race type: central, local, banei"),
+):
     """
     利用可能なモデルバージョン一覧を取得
 
     保存されている全てのモデルバージョンの情報を返します。
+    race_typeでフィルタリングできます。
     """
-    versions = retraining_service.list_model_versions()
+    if race_type not in RACE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid race_type: {race_type}. Must be one of {RACE_TYPES}")
+
+    versions = list_versions_by_type(race_type)
     return {
         "status": "success",
+        "race_type": race_type,
         "count": len(versions),
         "versions": versions,
     }
 
 
 @router.get("/current")
-async def get_current_model():
+async def get_current_model(
+    race_type: str = Query(DEFAULT_RACE_TYPE, description="Race type: central, local, banei"),
+):
     """
     現在使用中のモデル情報を取得
+
+    race_typeで指定したレースタイプのモデル情報を返します。
     """
-    predictor = prediction_service.get_predictor()
+    if race_type not in RACE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid race_type: {race_type}. Must be one of {RACE_TYPES}")
+
+    predictor = prediction_service.get_predictor(race_type)
 
     model_info = {
-        "version": prediction_service.MODEL_VERSION,
+        "version": prediction_service.MODEL_VERSIONS.get(race_type, prediction_service.MODEL_VERSION),
+        "race_type": race_type,
         "is_loaded": predictor.model is not None,
         "num_features": len(predictor.feature_columns) if predictor.feature_columns else 0,
     }
@@ -242,43 +266,48 @@ async def get_current_model():
 @router.post("/switch")
 async def switch_model(
     version: str = Query(..., description="Model version to switch to"),
+    race_type: str = Query(DEFAULT_RACE_TYPE, description="Race type: central, local, banei"),
 ):
     """
     使用するモデルを切り替え
 
     指定したバージョンのモデルに切り替えます。
+    race_typeでレースタイプを指定できます。
     現在はランタイム中の切り替えのみで、永続化はされません。
     """
-    logger.info(f"Switching model to version: {version}")
+    if race_type not in RACE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid race_type: {race_type}. Must be one of {RACE_TYPES}")
+
+    logger.info(f"Switching model to version: {version} for race_type: {race_type}")
 
     # バージョンの存在確認
-    versions = retraining_service.list_model_versions()
+    versions = list_versions_by_type(race_type)
     version_exists = any(v["version"] == version for v in versions)
 
     if not version_exists:
         raise HTTPException(
             status_code=404,
-            detail=f"Model version '{version}' not found"
+            detail=f"Model version '{version}' not found for race_type '{race_type}'"
         )
 
     try:
         # 新しいモデルを読み込み
         from app.services.predictor import HorseRacingPredictor
 
-        new_predictor = HorseRacingPredictor(model_version=version)
+        new_predictor = HorseRacingPredictor(model_version=version, race_type=race_type)
         new_predictor.load()
 
         # グローバルモデルを更新
-        prediction_service._predictor = new_predictor
-        prediction_service.MODEL_VERSION = version
+        prediction_service.set_predictor(new_predictor, race_type)
 
-        logger.info(f"Model switched to version: {version}")
+        logger.info(f"Model switched to version: {version} for race_type: {race_type}")
 
         return {
             "status": "success",
-            "message": f"Model switched to version {version}",
+            "message": f"Model switched to version {version} for {race_type}",
             "model": {
                 "version": version,
+                "race_type": race_type,
                 "num_features": len(new_predictor.feature_columns),
                 "best_iteration": new_predictor.model.best_iteration if new_predictor.model else None,
             },
@@ -287,7 +316,7 @@ async def switch_model(
     except FileNotFoundError:
         raise HTTPException(
             status_code=404,
-            detail=f"Model file for version '{version}' not found"
+            detail=f"Model file for version '{version}' (race_type: {race_type}) not found"
         )
     except Exception as e:
         logger.error(f"Failed to switch model: {e}")
@@ -300,18 +329,22 @@ async def switch_model(
 @router.get("/feature-importance")
 async def get_feature_importance(
     limit: int = Query(20, description="Number of top features to return"),
+    race_type: str = Query(DEFAULT_RACE_TYPE, description="Race type: central, local, banei"),
 ):
     """
     特徴量重要度を取得
 
-    現在のモデルの特徴量重要度上位を返します。
+    指定したレースタイプのモデルの特徴量重要度上位を返します。
     """
-    predictor = prediction_service.get_predictor()
+    if race_type not in RACE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid race_type: {race_type}. Must be one of {RACE_TYPES}")
+
+    predictor = prediction_service.get_predictor(race_type)
 
     if predictor.model is None:
         raise HTTPException(
             status_code=404,
-            detail="No model is loaded"
+            detail=f"No model is loaded for race_type '{race_type}'"
         )
 
     try:
@@ -321,6 +354,7 @@ async def get_feature_importance(
         return {
             "status": "success",
             "model_version": predictor.model_version,
+            "race_type": race_type,
             "features": top_features,
         }
 
@@ -1172,6 +1206,7 @@ class RetrainAndUploadParams(BaseModel):
     use_time_split: bool = False
     train_end_date: Optional[str] = None
     valid_end_date: Optional[str] = None
+    race_type: str = DEFAULT_RACE_TYPE
 
 
 @router.post("/retrain-and-upload")
@@ -1214,6 +1249,11 @@ async def retrain_and_upload(params: RetrainAndUploadParams):
             detail="Time-split mode requires train_end_date and valid_end_date"
         )
 
+    # race_typeのバリデーション
+    race_type = params.race_type
+    if race_type not in RACE_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid race_type: {race_type}. Must be one of {RACE_TYPES}")
+
     # 再学習を開始
     result = retraining_service.start_retraining(
         min_date=None,
@@ -1227,6 +1267,7 @@ async def retrain_and_upload(params: RetrainAndUploadParams):
         upload_after_training=True,
         upload_version=params.version,
         upload_description=params.description,
+        race_type=race_type,
     )
 
     if result["status"] == "already_running":

@@ -8,7 +8,7 @@ import type { Race, RaceListResponse, RaceDetailResponse, Entry } from '@/types/
 import type { Prediction } from '@/types/prediction';
 
 // レース一覧を取得
-export async function getRacesFromSupabase(targetDate?: string): Promise<RaceListResponse> {
+export async function getRacesFromSupabase(targetDate?: string, raceType?: string): Promise<RaceListResponse> {
   if (!supabase) throw new Error('Supabase is not configured');
 
   let query = supabase
@@ -19,6 +19,10 @@ export async function getRacesFromSupabase(targetDate?: string): Promise<RaceLis
 
   if (targetDate) {
     query = query.eq('date', targetDate);
+  }
+
+  if (raceType) {
+    query = query.eq('race_type', raceType);
   }
 
   const { data, error } = await query.limit(100);
@@ -247,31 +251,126 @@ export async function getJockeysFromSupabase(params?: {
 }
 
 // 統計情報を取得
-export async function getStatsFromSupabase() {
+export async function getStatsFromSupabase(raceType?: string) {
   if (!supabase) throw new Error('Supabase is not configured');
 
-  const [races, entries, horses, jockeys, predictions] = await Promise.all([
-    supabase.from('races').select('*', { count: 'exact', head: true }),
-    supabase.from('entries').select('*', { count: 'exact', head: true }),
-    supabase.from('horses').select('*', { count: 'exact', head: true }),
-    supabase.from('jockeys').select('*', { count: 'exact', head: true }),
-    supabase.from('predictions').select('*', { count: 'exact', head: true }),
-  ]);
+  // レースタイプでフィルタリングするクエリを構築
+  let racesQuery = supabase.from('races').select('*', { count: 'exact', head: true });
+  if (raceType) {
+    racesQuery = racesQuery.eq('race_type', raceType);
+  }
 
-  // 最新レース日付
-  const { data: latestRace } = await supabase
+  // エントリー数（race_typeでフィルタリングする場合はjoinが必要）
+  // Supabaseでは直接joinでカウントできないため、フィルタリングなしでカウント
+  // または、race_idsを取得してからフィルタリング
+  let entriesCount = 0;
+  if (raceType) {
+    // race_typeでフィルタリングされたレースのIDを取得
+    const { data: raceIds } = await supabase
+      .from('races')
+      .select('race_id')
+      .eq('race_type', raceType);
+
+    if (raceIds && raceIds.length > 0) {
+      const ids = raceIds.map(r => r.race_id);
+      const { count } = await supabase
+        .from('entries')
+        .select('*', { count: 'exact', head: true })
+        .in('race_id', ids);
+      entriesCount = count || 0;
+    }
+  } else {
+    const { count } = await supabase.from('entries').select('*', { count: 'exact', head: true });
+    entriesCount = count || 0;
+  }
+
+  // 予測数も同様にフィルタリング
+  let predictionsCount = 0;
+  if (raceType) {
+    const { data: raceIds } = await supabase
+      .from('races')
+      .select('race_id')
+      .eq('race_type', raceType);
+
+    if (raceIds && raceIds.length > 0) {
+      const ids = raceIds.map(r => r.race_id);
+      const { count } = await supabase
+        .from('predictions')
+        .select('*', { count: 'exact', head: true })
+        .in('race_id', ids);
+      predictionsCount = count || 0;
+    }
+  } else {
+    const { count } = await supabase.from('predictions').select('*', { count: 'exact', head: true });
+    predictionsCount = count || 0;
+  }
+
+  // 馬数・騎手数もrace_typeでフィルタリング
+  let horsesCount = 0;
+  let jockeysCount = 0;
+
+  if (raceType) {
+    // そのレースタイプに出走した馬・騎手のみカウント
+    const { data: raceIds } = await supabase
+      .from('races')
+      .select('race_id')
+      .eq('race_type', raceType);
+
+    if (raceIds && raceIds.length > 0) {
+      const ids = raceIds.map(r => r.race_id);
+
+      // 出走した馬のユニーク数
+      const { data: horseEntries } = await supabase
+        .from('entries')
+        .select('horse_id')
+        .in('race_id', ids);
+      if (horseEntries) {
+        const uniqueHorses = new Set(horseEntries.map(e => e.horse_id));
+        horsesCount = uniqueHorses.size;
+      }
+
+      // 出走した騎手のユニーク数
+      const { data: jockeyEntries } = await supabase
+        .from('entries')
+        .select('jockey_id')
+        .in('race_id', ids)
+        .not('jockey_id', 'is', null);
+      if (jockeyEntries) {
+        const uniqueJockeys = new Set(jockeyEntries.map(e => e.jockey_id));
+        jockeysCount = uniqueJockeys.size;
+      }
+    }
+  } else {
+    // フィルタなしの場合は全体をカウント
+    const [horsesResult, jockeysResult] = await Promise.all([
+      supabase.from('horses').select('*', { count: 'exact', head: true }),
+      supabase.from('jockeys').select('*', { count: 'exact', head: true }),
+    ]);
+    horsesCount = horsesResult.count || 0;
+    jockeysCount = jockeysResult.count || 0;
+  }
+
+  const races = await racesQuery;
+
+  // 最新レース日付（race_typeでフィルタリング）
+  let latestRaceQuery = supabase
     .from('races')
     .select('date')
     .order('date', { ascending: false })
-    .limit(1)
-    .single();
+    .limit(1);
+
+  if (raceType) {
+    latestRaceQuery = latestRaceQuery.eq('race_type', raceType);
+  }
+
+  const { data: latestRace } = await latestRaceQuery.single();
 
   return {
     total_races: races.count || 0,
-    total_entries: entries.count || 0,
-    total_horses: horses.count || 0,
-    total_jockeys: jockeys.count || 0,
-    total_predictions: predictions.count || 0,
+    total_entries: entriesCount,
+    total_horses: horsesCount,
+    total_jockeys: jockeysCount,
+    total_predictions: predictionsCount,
     latest_race_date: latestRace?.date,
   };
 }

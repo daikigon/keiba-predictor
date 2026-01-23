@@ -12,10 +12,17 @@ from app.logging_config import get_logger
 from app.models.prediction import Prediction, History
 from app.models.race import Race, Entry
 from app.services.predictor import FeatureExtractor, get_model
+from app.services.predictor.model import DEFAULT_RACE_TYPE, RACE_TYPES
 
 logger = get_logger(__name__)
 
+# レースタイプ別のモデルバージョン
 MODEL_VERSION = "v1"
+MODEL_VERSIONS: dict[str, str] = {
+    "central": "v1",
+    "local": "v1",
+    "banei": "v1",
+}
 
 # 期待値ベース推奨のデフォルト閾値（PDF推奨値に準拠）
 DEFAULT_EV_THRESHOLD = 1.0  # 期待値が1.0以上で推奨
@@ -25,7 +32,10 @@ DEFAULT_UMAREN_MAX_EV = 5.0  # 馬連の期待値上限
 DEFAULT_MIN_PRED = 0.01  # 最低予測確率（1%未満は除外）
 DEFAULT_UMAREN_TOP_N = 3  # 馬連の組み合わせ対象馬数
 
-# グローバルモデルインスタンス（起動時に一度だけ読み込み）
+# レースタイプ別のグローバルモデルインスタンス
+_predictors: dict[str, any] = {}
+
+# 後方互換性のため（centralのモデル）
 _predictor = None
 
 # 予測結果キャッシュ（TTL: 5分）
@@ -74,12 +84,56 @@ def clear_prediction_cache(race_id: Optional[str] = None) -> int:
         return count
 
 
-def get_predictor():
-    """学習済みモデルを取得（シングルトン）"""
-    global _predictor
-    if _predictor is None:
-        _predictor = get_model(MODEL_VERSION)
-    return _predictor
+def get_predictor(race_type: str = DEFAULT_RACE_TYPE):
+    """
+    学習済みモデルを取得（レースタイプ別シングルトン）
+
+    Args:
+        race_type: レースタイプ（central, local, banei）
+
+    Returns:
+        HorseRacingPredictor インスタンス
+    """
+    global _predictors, _predictor
+
+    # レースタイプのバリデーション
+    if race_type not in RACE_TYPES:
+        race_type = DEFAULT_RACE_TYPE
+
+    # キャッシュにあればそれを返す
+    if race_type in _predictors:
+        return _predictors[race_type]
+
+    # 新しいモデルを読み込み
+    version = MODEL_VERSIONS.get(race_type, MODEL_VERSION)
+    predictor = get_model(version, race_type)
+    _predictors[race_type] = predictor
+
+    # 後方互換性: centralの場合は_predictorにも設定
+    if race_type == DEFAULT_RACE_TYPE:
+        _predictor = predictor
+
+    return predictor
+
+
+def set_predictor(predictor, race_type: str = DEFAULT_RACE_TYPE):
+    """
+    モデルを設定（モデル切り替え用）
+
+    Args:
+        predictor: HorseRacingPredictorインスタンス
+        race_type: レースタイプ
+    """
+    global _predictors, _predictor, MODEL_VERSIONS
+
+    _predictors[race_type] = predictor
+    MODEL_VERSIONS[race_type] = predictor.model_version
+
+    # 後方互換性
+    if race_type == DEFAULT_RACE_TYPE:
+        _predictor = predictor
+        global MODEL_VERSION
+        MODEL_VERSION = predictor.model_version
 
 
 def create_prediction(db: Session, race_id: str) -> Prediction:

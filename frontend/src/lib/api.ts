@@ -61,12 +61,15 @@ async function fetchApi<T>(endpoint: string, options?: FetchOptions): Promise<T>
 }
 
 // Races API
-export async function getRaces(date?: string): Promise<RaceListResponse> {
+export async function getRaces(date?: string, raceType?: string): Promise<RaceListResponse> {
   if (useSupabase && isSupabaseConfigured) {
-    return getRacesFromSupabase(date);
+    return getRacesFromSupabase(date, raceType);
   }
-  const params = date ? `?target_date=${date}` : '';
-  return fetchApi<RaceListResponse>(`/api/v1/races${params}`);
+  const params = new URLSearchParams();
+  if (date) params.append('target_date', date);
+  if (raceType) params.append('race_type', raceType);
+  const queryString = params.toString() ? `?${params.toString()}` : '';
+  return fetchApi<RaceListResponse>(`/api/v1/races${queryString}`);
 }
 
 export async function getRaceDetail(raceId: string): Promise<RaceDetailResponse> {
@@ -152,12 +155,14 @@ export async function getAccuracyStats(period?: string): Promise<AccuracyStats> 
   return fetchApi<AccuracyStats>(`/api/v1/stats/accuracy${params}`);
 }
 
-export async function getScrapeStats(): Promise<ScrapeStats> {
+export async function getScrapeStats(raceType?: string): Promise<ScrapeStats> {
   if (useSupabase && isSupabaseConfigured) {
-    return getStatsFromSupabase();
+    return getStatsFromSupabase(raceType);
   }
+  const params = raceType ? `?race_type=${raceType}` : '';
   const response = await fetchApi<{
     status: string;
+    race_type: string | null;
     last_updated: string | null;
     counts: {
       total_races: number;
@@ -171,7 +176,7 @@ export async function getScrapeStats(): Promise<ScrapeStats> {
       oldest: string | null;
       newest: string | null;
     };
-  }>('/api/v1/stats/scrape');
+  }>(`/api/v1/stats/scrape${params}`);
 
   return {
     total_races: response.counts.total_races,
@@ -205,11 +210,20 @@ export interface ScrapeDetailResult {
   };
 }
 
-export async function scrapeRaceList(targetDate: string, jraOnly: boolean = false): Promise<ScrapeResult> {
-  return fetchApi<ScrapeResult>(
-    `/api/v1/races/scrape?target_date=${targetDate}&save_to_db=true&jra_only=${jraOnly}`,
-    { method: 'POST' }
-  );
+export async function scrapeRaceList(
+  targetDate: string,
+  jraOnly: boolean = false,
+  raceType?: string
+): Promise<ScrapeResult> {
+  const params = new URLSearchParams();
+  params.append('target_date', targetDate);
+  params.append('save_to_db', 'true');
+  if (raceType) {
+    params.append('race_type', raceType);
+  } else if (jraOnly) {
+    params.append('jra_only', 'true');
+  }
+  return fetchApi<ScrapeResult>(`/api/v1/races/scrape?${params.toString()}`, { method: 'POST' });
 }
 
 export async function scrapeRaceDetail(raceId: string, force: boolean = false): Promise<ScrapeDetailResult> {
@@ -220,11 +234,20 @@ export async function scrapeRaceDetail(raceId: string, force: boolean = false): 
 }
 
 // Today's Race Card Scraping API (出馬表)
-export async function scrapeRaceCardList(targetDate: string, jraOnly: boolean = false): Promise<ScrapeResult> {
-  return fetchApi<ScrapeResult>(
-    `/api/v1/races/scrape-card?target_date=${targetDate}&save_to_db=true&jra_only=${jraOnly}`,
-    { method: 'POST' }
-  );
+export async function scrapeRaceCardList(
+  targetDate: string,
+  jraOnly: boolean = false,
+  raceType?: string
+): Promise<ScrapeResult> {
+  const params = new URLSearchParams();
+  params.append('target_date', targetDate);
+  params.append('save_to_db', 'true');
+  if (raceType) {
+    params.append('race_type', raceType);
+  } else if (jraOnly) {
+    params.append('jra_only', 'true');
+  }
+  return fetchApi<ScrapeResult>(`/api/v1/races/scrape-card?${params.toString()}`, { method: 'POST' });
 }
 
 export async function scrapeRaceCardDetail(raceId: string, force: boolean = false): Promise<ScrapeDetailResult> {
@@ -288,6 +311,7 @@ export interface HorseDetail extends Horse {
 export async function getHorses(params?: {
   search?: string;
   sex?: string;
+  race_type?: string;
   limit?: number;
   offset?: number;
 }): Promise<HorseListResponse> {
@@ -297,6 +321,7 @@ export async function getHorses(params?: {
   const searchParams = new URLSearchParams();
   if (params?.search) searchParams.set('search', params.search);
   if (params?.sex) searchParams.set('sex', params.sex);
+  if (params?.race_type) searchParams.set('race_type', params.race_type);
   if (params?.limit) searchParams.set('limit', params.limit.toString());
   if (params?.offset) searchParams.set('offset', params.offset.toString());
   const query = searchParams.toString();
@@ -399,6 +424,7 @@ export interface JockeyDetail {
 
 export async function getJockeys(params?: {
   search?: string;
+  race_type?: string;
   limit?: number;
   offset?: number;
 }): Promise<JockeyListResponse> {
@@ -407,6 +433,7 @@ export async function getJockeys(params?: {
   }
   const searchParams = new URLSearchParams();
   if (params?.search) searchParams.set('search', params.search);
+  if (params?.race_type) searchParams.set('race_type', params.race_type);
   if (params?.limit) searchParams.set('limit', params.limit.toString());
   if (params?.offset) searchParams.set('offset', params.offset.toString());
   const query = searchParams.toString();
@@ -532,20 +559,23 @@ export interface SimulationStatus {
   error: string | null;
 }
 
-export async function getModelVersions(): Promise<ModelVersion[]> {
+export async function getModelVersions(raceType?: string): Promise<ModelVersion[]> {
+  const params = raceType ? `?race_type=${raceType}` : '';
   const response = await fetchApi<{
     status: string;
+    race_type?: string;
     count: number;
     versions: ModelVersion[];
-  }>('/api/v1/model/versions');
+  }>(`/api/v1/model/versions${params}`);
   return response.versions;
 }
 
-export async function getCurrentModel(): Promise<CurrentModel> {
+export async function getCurrentModel(raceType?: string): Promise<CurrentModel> {
+  const params = raceType ? `?race_type=${raceType}` : '';
   const response = await fetchApi<{
     status: string;
     model: CurrentModel;
-  }>('/api/v1/model/current');
+  }>(`/api/v1/model/current${params}`);
   return response.model;
 }
 
@@ -567,6 +597,8 @@ export interface RetrainParams {
   use_time_split?: boolean;
   train_end_date?: string;  // 学習データ終了日
   valid_end_date?: string;  // 検証データ終了日
+  // 競馬タイプ
+  race_type?: string;  // 'central' | 'local' | 'banei'
 }
 
 export async function startRetraining(params?: RetrainParams): Promise<{ started_at: string }> {
@@ -579,20 +611,27 @@ export async function startRetraining(params?: RetrainParams): Promise<{ started
   );
 }
 
-export async function switchModel(version: string): Promise<{ model: CurrentModel }> {
+export async function switchModel(version: string, raceType?: string): Promise<{ model: CurrentModel }> {
+  const params = new URLSearchParams();
+  params.append('version', version);
+  if (raceType) params.append('race_type', raceType);
   return fetchApi<{ status: string; model: CurrentModel }>(
-    `/api/v1/model/switch?version=${encodeURIComponent(version)}`,
+    `/api/v1/model/switch?${params.toString()}`,
     { method: 'POST' }
   );
 }
 
-export async function getFeatureImportance(limit?: number): Promise<FeatureImportance[]> {
-  const params = limit ? `?limit=${limit}` : '';
+export async function getFeatureImportance(limit?: number, raceType?: string): Promise<FeatureImportance[]> {
+  const params = new URLSearchParams();
+  if (limit) params.append('limit', limit.toString());
+  if (raceType) params.append('race_type', raceType);
+  const queryString = params.toString() ? `?${params.toString()}` : '';
   const response = await fetchApi<{
     status: string;
     model_version: string;
+    race_type?: string;
     features: FeatureImportance[];
-  }>(`/api/v1/model/feature-importance${params}`);
+  }>(`/api/v1/model/feature-importance${queryString}`);
   return response.features;
 }
 

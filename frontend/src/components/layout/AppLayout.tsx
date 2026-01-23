@@ -4,7 +4,7 @@ import { usePathname } from 'next/navigation';
 import { Header } from './Header';
 import { Footer } from './Footer';
 
-const NO_LAYOUT_PATHS = ['/login'];
+const NO_LAYOUT_PATHS = ['/login', '/'];
 
 export function AppLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();

@@ -109,3 +109,6 @@ logs/
 .cache/
 tmp/
 temp/
+# Local state files
+backend/app/services/.sync_state.json
+*.pkl

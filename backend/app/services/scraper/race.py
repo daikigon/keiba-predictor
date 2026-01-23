@@ -1,26 +1,207 @@
 import re
+import logging
 from datetime import date, datetime
 from typing import Optional
 
 from app.services.scraper.base import BaseScraper, ScraperError
+from app.constants import (
+    CENTRAL_COURSE_CODES,
+    LOCAL_COURSE_CODES,
+    BANEI_COURSE_CODES,
+    ALL_COURSE_CODES,
+    get_race_type_from_course_code,
+    RACE_TYPE_CENTRAL,
+    RACE_TYPE_LOCAL,
+    RACE_TYPE_BANEI,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class RaceListScraper(BaseScraper):
-    """Scraper for race list page using db.netkeiba"""
+    """Scraper for race list page using multiple sources"""
 
+    # db.netkeiba.com - for central racing and banei
     BASE_URL = "https://db.netkeiba.com/race/list"
+
+    # nar.netkeiba.com - for local (NAR) racing (includes all tracks like 園田)
+    NAR_BASE_URL = "https://nar.netkeiba.com/top/race_list_sub.html"
+
     HTML_SUBDIR = "race_lists"
 
-    # JRA course codes (central racing)
-    JRA_COURSE_CODES = {"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"}
+    # Course codes by racing type
+    COURSE_CODES_BY_TYPE = {
+        RACE_TYPE_CENTRAL: set(CENTRAL_COURSE_CODES.keys()),
+        RACE_TYPE_LOCAL: set(LOCAL_COURSE_CODES.keys()),
+        RACE_TYPE_BANEI: set(BANEI_COURSE_CODES.keys()),
+    }
 
-    def scrape(self, target_date: date, jra_only: bool = False) -> list[dict]:
+    def scrape(
+        self,
+        target_date: date,
+        jra_only: bool = False,
+        race_type: Optional[str] = None,
+    ) -> list[dict]:
         """
         Scrape race list for a given date
 
         Args:
             target_date: Target date to scrape
-            jra_only: If True, only return JRA (central racing) races
+            jra_only: If True, only return JRA (central racing) races (deprecated, use race_type)
+            race_type: Filter by race type: "central", "local", "banei", or None for all
+
+        Returns:
+            List of race info dictionaries
+        """
+        races = []
+        seen_ids = set()
+
+        # Determine which race types to fetch
+        if race_type == RACE_TYPE_LOCAL:
+            # Use nar.netkeiba.com for local races (faster and complete)
+            races = self._scrape_nar(target_date, seen_ids)
+        elif race_type == RACE_TYPE_CENTRAL or jra_only:
+            # Use db.netkeiba.com for central races
+            races = self._scrape_db_netkeiba(target_date, seen_ids, central_only=True)
+        elif race_type == RACE_TYPE_BANEI:
+            # Use nar.netkeiba.com for banei races (code 65)
+            races = self._scrape_banei(target_date, seen_ids)
+        else:
+            # Fetch all race types
+            # 1. Local races from nar.netkeiba.com (excludes Banei)
+            local_races = self._scrape_nar(target_date, seen_ids)
+            races.extend(local_races)
+
+            # 2. Banei races from nar.netkeiba.com (code 65)
+            banei_races = self._scrape_banei(target_date, seen_ids)
+            races.extend(banei_races)
+
+            # 3. Central races from db.netkeiba.com
+            central_races = self._scrape_db_netkeiba(target_date, seen_ids, central_only=True)
+            races.extend(central_races)
+
+        return races
+
+    # nar.netkeiba.comでばんえいに使用されるコード（地方競馬取得時にスキップ）
+    NAR_BANEI_CODES = {"65"}
+
+    def _scrape_nar(self, target_date: date, seen_ids: set) -> list[dict]:
+        """
+        Scrape local (NAR) race list from nar.netkeiba.com
+        This includes all local tracks including 園田, 門別, etc.
+        Note: Banei races (code 65) are excluded - use separate Banei scraper.
+
+        Args:
+            target_date: Target date to scrape
+            seen_ids: Set of already seen race IDs
+
+        Returns:
+            List of race info dictionaries
+        """
+        date_str = target_date.strftime("%Y%m%d")
+        url = f"{self.NAR_BASE_URL}?kaisai_date={date_str}"
+
+        try:
+            html = self.fetch(url, identifier=f"nar_{date_str}")
+            soup = self.parse_html(html)
+        except Exception as e:
+            logger.warning(f"Failed to fetch NAR race list: {e}")
+            return []
+
+        races = []
+
+        # Find all race links with race_id parameter
+        for link in soup.find_all("a", href=True):
+            href = link.get("href", "")
+            # Match pattern like race_id=202550120201
+            race_id_match = re.search(r"race_id=(\d{12})", href)
+            if race_id_match:
+                race_id = race_id_match.group(1)
+                if race_id not in seen_ids:
+                    course_code = race_id[4:6] if len(race_id) >= 6 else ""
+
+                    # Skip Banei races (code 65) - handled separately
+                    if course_code in self.NAR_BANEI_CODES:
+                        continue
+
+                    seen_ids.add(race_id)
+                    race_name = link.get_text(strip=True)
+                    races.append({
+                        "race_id": race_id,
+                        "race_type": RACE_TYPE_LOCAL,
+                        "date": target_date,
+                        "race_name": race_name if race_name else f"{self._get_race_number(race_id)}R",
+                    })
+
+        logger.info(f"Found {len(races)} NAR races for {target_date}")
+        return races
+
+    def _scrape_banei(self, target_date: date, seen_ids: set) -> list[dict]:
+        """
+        Scrape Banei race list from nar.netkeiba.com (code 65)
+
+        Args:
+            target_date: Target date to scrape
+            seen_ids: Set of already seen race IDs
+
+        Returns:
+            List of Banei race info dictionaries
+        """
+        date_str = target_date.strftime("%Y%m%d")
+        url = f"{self.NAR_BASE_URL}?kaisai_date={date_str}"
+
+        try:
+            html = self.fetch(url, identifier=f"nar_{date_str}")
+            soup = self.parse_html(html)
+        except Exception as e:
+            logger.warning(f"Failed to fetch Banei race list: {e}")
+            return []
+
+        races = []
+
+        # Find all race links with race_id parameter
+        for link in soup.find_all("a", href=True):
+            href = link.get("href", "")
+            # Match pattern like race_id=202565120101
+            race_id_match = re.search(r"race_id=(\d{12})", href)
+            if race_id_match:
+                race_id = race_id_match.group(1)
+                if race_id not in seen_ids:
+                    course_code = race_id[4:6] if len(race_id) >= 6 else ""
+
+                    # Only include Banei races (code 65)
+                    if course_code not in self.NAR_BANEI_CODES:
+                        continue
+
+                    seen_ids.add(race_id)
+                    race_name = link.get_text(strip=True)
+                    races.append({
+                        "race_id": race_id,
+                        "race_type": RACE_TYPE_BANEI,
+                        "date": target_date,
+                        "race_name": race_name if race_name else f"{self._get_race_number(race_id)}R",
+                    })
+
+        logger.info(f"Found {len(races)} Banei races for {target_date}")
+        return races
+
+    def _scrape_db_netkeiba(
+        self,
+        target_date: date,
+        seen_ids: set,
+        central_only: bool = False,
+        banei_only: bool = False,
+        exclude_local: bool = False,
+    ) -> list[dict]:
+        """
+        Scrape race list from db.netkeiba.com
+
+        Args:
+            target_date: Target date to scrape
+            seen_ids: Set of already seen race IDs
+            central_only: Only return central racing
+            banei_only: Only return banei racing
+            exclude_local: Exclude local racing (already fetched from NAR)
 
         Returns:
             List of race info dictionaries
@@ -28,11 +209,27 @@ class RaceListScraper(BaseScraper):
         date_str = target_date.strftime("%Y%m%d")
         url = f"{self.BASE_URL}/{date_str}/"
 
-        html = self.fetch(url, identifier=date_str)
-        soup = self.parse_html(html)
+        try:
+            html = self.fetch(url, identifier=date_str)
+            soup = self.parse_html(html)
+        except Exception as e:
+            logger.warning(f"Failed to fetch db.netkeiba race list: {e}")
+            return []
 
         races = []
-        seen_ids = set()
+
+        # Determine allowed course codes
+        if central_only:
+            allowed_codes = self.COURSE_CODES_BY_TYPE[RACE_TYPE_CENTRAL]
+        elif banei_only:
+            allowed_codes = self.COURSE_CODES_BY_TYPE[RACE_TYPE_BANEI]
+        elif exclude_local:
+            allowed_codes = (
+                self.COURSE_CODES_BY_TYPE[RACE_TYPE_CENTRAL] |
+                self.COURSE_CODES_BY_TYPE[RACE_TYPE_BANEI]
+            )
+        else:
+            allowed_codes = None
 
         # Find all race links
         for link in soup.find_all("a", href=True):
@@ -42,25 +239,32 @@ class RaceListScraper(BaseScraper):
             if race_id_match:
                 race_id = race_id_match.group(1)
                 if race_id not in seen_ids:
-                    # Filter by JRA if requested
-                    if jra_only and not self._is_jra_race(race_id):
+                    course_code = race_id[4:6] if len(race_id) >= 6 else ""
+
+                    # Filter by allowed codes
+                    if allowed_codes is not None and course_code not in allowed_codes:
                         continue
+
                     seen_ids.add(race_id)
                     race_name = link.get_text(strip=True)
                     races.append({
                         "race_id": race_id,
+                        "race_type": get_race_type_from_course_code(course_code),
                         "date": target_date,
                         "race_name": race_name,
                     })
 
+        logger.info(f"Found {len(races)} races from db.netkeiba for {target_date}")
         return races
 
-    def _is_jra_race(self, race_id: str) -> bool:
-        """Check if race is JRA (central racing) based on course code"""
-        if len(race_id) >= 6:
-            course_code = race_id[4:6]
-            return course_code in self.JRA_COURSE_CODES
-        return False
+    def _get_race_number(self, race_id: str) -> int:
+        """Extract race number from race_id"""
+        if len(race_id) >= 12:
+            try:
+                return int(race_id[10:12])
+            except ValueError:
+                pass
+        return 0
 
 
 class RaceDetailScraper(BaseScraper):
@@ -69,12 +273,8 @@ class RaceDetailScraper(BaseScraper):
     BASE_URL = "https://db.netkeiba.com/race"
     HTML_SUBDIR = "races"
 
-    # Course code mapping
-    COURSE_CODES = {
-        "01": "札幌", "02": "函館", "03": "福島", "04": "新潟",
-        "05": "東京", "06": "中山", "07": "中京", "08": "京都",
-        "09": "阪神", "10": "小倉",
-    }
+    # Course code mapping (centralized)
+    COURSE_CODES = ALL_COURSE_CODES
 
     def scrape(self, race_id: str) -> dict:
         """
@@ -98,8 +298,10 @@ class RaceDetailScraper(BaseScraper):
 
     def _parse_race_info(self, soup, race_id: str) -> dict:
         """Parse race info from db.netkeiba page"""
+        course_code = race_id[4:6] if len(race_id) >= 6 else ""
         race_data = {
             "race_id": race_id,
+            "race_type": get_race_type_from_course_code(course_code),
             "course": self._get_course_from_id(race_id),
             "race_number": self._get_race_number_from_id(race_id),
         }
@@ -220,7 +422,8 @@ class RaceDetailScraper(BaseScraper):
         horse_link = cells[3].select_one("a")
         if horse_link:
             href = horse_link.get("href", "")
-            horse_id_match = re.search(r"/horse/(\d+)", href)
+            # Match all ID formats: numeric, Banei (B+digits), or other alphanumeric
+            horse_id_match = re.search(r"/horse/([a-zA-Z0-9]+)", href)
             if horse_id_match:
                 entry["horse_id"] = horse_id_match.group(1)
             entry["horse_name"] = horse_link.get_text(strip=True)
@@ -246,7 +449,8 @@ class RaceDetailScraper(BaseScraper):
         jockey_link = cells[6].select_one("a")
         if jockey_link:
             href = jockey_link.get("href", "")
-            jockey_id_match = re.search(r"/jockey/(?:result/recent/)?(\d+)", href)
+            # Match all ID formats: numeric, Banei (B+digits), local (alphanumeric like a05dd)
+            jockey_id_match = re.search(r"/jockey/(?:result/recent/)?([a-zA-Z0-9]+)", href)
             if jockey_id_match:
                 entry["jockey_id"] = jockey_id_match.group(1)
             entry["jockey_name"] = jockey_link.get_text(strip=True)

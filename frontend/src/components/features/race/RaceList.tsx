@@ -3,9 +3,10 @@ import type { Race } from '@/types/race';
 
 interface RaceListProps {
   races: Race[];
+  baseUrl?: string;
 }
 
-export function RaceList({ races }: RaceListProps) {
+export function RaceList({ races, baseUrl = '/central' }: RaceListProps) {
   if (races.length === 0) {
     return (
       <div className="text-center py-12">
@@ -32,7 +33,7 @@ export function RaceList({ races }: RaceListProps) {
             {courseRaces
               .sort((a, b) => a.race_number - b.race_number)
               .map((race) => (
-                <RaceCard key={race.race_id} race={race} />
+                <RaceCard key={race.race_id} race={race} baseUrl={baseUrl} />
               ))}
           </div>
         </div>

@@ -30,6 +30,7 @@ _bulk_rescrape_status = {
 async def get_horses(
     search: Optional[str] = Query(None, description="Search by name"),
     sex: Optional[str] = Query(None, description="Filter by sex (牡/牝/セ)"),
+    race_type: Optional[str] = Query(None, description="Filter by race type (central/local/banei)"),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
@@ -41,6 +42,17 @@ async def get_horses(
         query = query.filter(Horse.name.contains(search))
     if sex:
         query = query.filter(Horse.sex == sex)
+
+    # Filter by race_type: only horses that have entries in races of this type
+    if race_type:
+        query = query.filter(
+            Horse.horse_id.in_(
+                db.query(Entry.horse_id)
+                .join(Race, Entry.race_id == Race.race_id)
+                .filter(Race.race_type == race_type)
+                .distinct()
+            )
+        )
 
     total = query.count()
     horses = query.order_by(Horse.name).offset(offset).limit(limit).all()

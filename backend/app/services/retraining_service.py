@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.logging_config import get_logger
 from app.db.base import SessionLocal
 from app.services.predictor import prepare_training_data, prepare_time_split_data, HorseRacingPredictor
-from app.services.predictor.model import MODEL_DIR
+from app.services.predictor.model import MODEL_DIR, DEFAULT_RACE_TYPE, RACE_TYPES
 
 logger = get_logger(__name__)
 
@@ -154,6 +154,8 @@ def start_retraining(
     upload_description: Optional[str] = None,
     # ターゲット変数の戦略
     target_strategy: int = 2,
+    # レースタイプ（central, local, banei）
+    race_type: str = DEFAULT_RACE_TYPE,
 ) -> dict:
     """
     再学習を開始する
@@ -170,10 +172,14 @@ def start_retraining(
         upload_version: アップロード時のバージョン名
         upload_description: アップロード時の説明
         target_strategy: ターゲット変数の戦略（0=1着のみ正例, 2=タイム同着も正例）
+        race_type: レースタイプ（central, local, banei）
 
     Returns:
         開始状態
     """
+    # race_typeのバリデーション
+    if race_type not in RACE_TYPES:
+        race_type = DEFAULT_RACE_TYPE
     with _lock:
         if _retraining_status["is_running"]:
             return {
@@ -191,7 +197,7 @@ def start_retraining(
         args=(min_date, num_boost_round, early_stopping, valid_fraction,
               use_time_split, train_end_date, valid_end_date,
               upload_after_training, upload_version, upload_description,
-              target_strategy),
+              target_strategy, race_type),
         daemon=True,
     )
     thread.start()
@@ -214,6 +220,7 @@ def _run_retraining(
     upload_version: Optional[str] = None,
     upload_description: Optional[str] = None,
     target_strategy: int = 2,
+    race_type: str = DEFAULT_RACE_TYPE,
 ) -> None:
     """バックグラウンドで再学習を実行"""
     result = RetrainingResult()
@@ -248,7 +255,12 @@ def _run_retraining(
         })
         logger.info(f"Target strategy: {target_strategy} ({strategy_desc})")
 
-        predictor = HorseRacingPredictor(model_version=version)
+        predictor = HorseRacingPredictor(model_version=version, race_type=race_type)
+
+        emit_progress("info", {
+            "message": f"レースタイプ: {race_type}",
+        })
+        logger.info(f"Race type: {race_type}")
 
         if use_time_split and train_end_date and valid_end_date:
             # 時系列分割モード（Train/Valid/Testの3分割）

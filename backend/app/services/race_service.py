@@ -8,12 +8,14 @@ from app.models.race import Race, Entry
 from app.models.horse import Horse
 from app.models.jockey import Jockey
 from app.services.scraper.jockey import JockeyScraper
+from app.constants import RACE_TYPE_CENTRAL
 
 
 def get_races_by_date(
     db: Session,
     target_date: Optional[date] = None,
     course: Optional[str] = None,
+    race_type: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[int, list[Race]]:
@@ -24,6 +26,8 @@ def get_races_by_date(
         query = query.where(Race.date == target_date)
     if course:
         query = query.where(Race.course == course)
+    if race_type:
+        query = query.where(Race.race_type == race_type)
 
     # Get total count
     count_query = select(Race)
@@ -31,6 +35,8 @@ def get_races_by_date(
         count_query = count_query.where(Race.date == target_date)
     if course:
         count_query = count_query.where(Race.course == course)
+    if race_type:
+        count_query = count_query.where(Race.race_type == race_type)
     total = len(db.execute(count_query).scalars().all())
 
     # Get paginated results
@@ -60,6 +66,7 @@ def save_race(db: Session, race_data: dict) -> Race:
         # Create new race
         race = Race(
             race_id=race_id,
+            race_type=race_data.get("race_type", RACE_TYPE_CENTRAL),
             date=race_data.get("date"),
             course=race_data.get("course", ""),
             race_number=race_data.get("race_number", 0),

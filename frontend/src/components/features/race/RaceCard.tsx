@@ -7,14 +7,15 @@ import type { Race } from '@/types/race';
 
 interface RaceCardProps {
   race: Race;
+  baseUrl?: string;
 }
 
-export function RaceCard({ race }: RaceCardProps) {
+export function RaceCard({ race, baseUrl = '/central' }: RaceCardProps) {
   const courseColor = COURSE_COLORS[race.course] || 'bg-gray-100 text-gray-800';
   const gradeColor = race.grade ? GRADE_COLORS[race.grade] : null;
 
   return (
-    <Link href={`/races/${race.race_id}`}>
+    <Link href={`${baseUrl}/races/${race.race_id}`}>
       <Card className="hover:shadow-md transition-shadow cursor-pointer">
         <CardContent className="p-4">
           <div className="flex items-start justify-between">

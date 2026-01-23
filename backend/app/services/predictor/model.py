@@ -6,6 +6,7 @@ LightGBMを使用した競馬予測モデル
 """
 import os
 import pickle
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -22,11 +23,35 @@ from .features import get_feature_columns
 # モデル保存ディレクトリ
 MODEL_DIR = Path(__file__).parent.parent.parent.parent / "ml" / "models"
 
+# サポートするレースタイプ
+RACE_TYPES = ["central", "local", "banei"]
+DEFAULT_RACE_TYPE = "central"
+
+
+def get_model_filename(race_type: str, version: str) -> str:
+    """モデルファイル名を生成"""
+    if race_type == DEFAULT_RACE_TYPE:
+        # 後方互換性: centralの場合は従来の命名も許容
+        return f"model_{version}.pkl"
+    return f"model_{race_type}_{version}.pkl"
+
+
+def get_model_dir(race_type: str) -> Path:
+    """レースタイプ別のモデルディレクトリを取得"""
+    if race_type == DEFAULT_RACE_TYPE:
+        return MODEL_DIR
+    return MODEL_DIR / race_type
+
 
 class HorseRacingPredictor:
     """競馬予測モデル（キャリブレーション機能付き）"""
 
-    def __init__(self, model_version: str = "v1", label_smoothing: float = 0.0):
+    def __init__(
+        self,
+        model_version: str = "v1",
+        label_smoothing: float = 0.0,
+        race_type: str = DEFAULT_RACE_TYPE,
+    ):
         """
         Args:
             model_version: モデルバージョン
@@ -34,8 +59,10 @@ class HorseRacingPredictor:
                            0.0: スムージングなし（従来通り）
                            0.05: 軽いスムージング（推奨）
                            参考PDFでは目的変数に「少し加工」を施していると記載
+            race_type: レースタイプ（central, local, banei）
         """
         self.model_version = model_version
+        self.race_type = race_type if race_type in RACE_TYPES else DEFAULT_RACE_TYPE
         self.model: Optional[lgb.Booster] = None
         self.scaler: Optional[StandardScaler] = None
         self.calibrator: Optional[IsotonicRegression] = None
@@ -568,8 +595,10 @@ class HorseRacingPredictor:
             raise RuntimeError("Model not trained")
 
         if path is None:
-            MODEL_DIR.mkdir(parents=True, exist_ok=True)
-            path = MODEL_DIR / f"model_{self.model_version}.pkl"
+            model_dir = get_model_dir(self.race_type)
+            model_dir.mkdir(parents=True, exist_ok=True)
+            filename = get_model_filename(self.race_type, self.model_version)
+            path = model_dir / filename
 
         model_data = {
             "model": self.model,
@@ -578,6 +607,7 @@ class HorseRacingPredictor:
             "feature_columns": self.feature_columns,
             "model_version": self.model_version,
             "label_smoothing": self.label_smoothing,
+            "race_type": self.race_type,
         }
 
         with open(path, "wb") as f:
@@ -593,7 +623,15 @@ class HorseRacingPredictor:
             path: モデルファイルパス
         """
         if path is None:
-            path = MODEL_DIR / f"model_{self.model_version}.pkl"
+            model_dir = get_model_dir(self.race_type)
+            filename = get_model_filename(self.race_type, self.model_version)
+            path = model_dir / filename
+
+            # 後方互換性: centralで新命名が見つからない場合は従来命名を試す
+            if not path.exists() and self.race_type == DEFAULT_RACE_TYPE:
+                legacy_path = MODEL_DIR / f"model_{self.model_version}.pkl"
+                if legacy_path.exists():
+                    path = legacy_path
 
         if not path.exists():
             raise FileNotFoundError(f"Model file not found: {path}")
@@ -607,6 +645,7 @@ class HorseRacingPredictor:
         self.feature_columns = model_data["feature_columns"]
         self.model_version = model_data["model_version"]
         self.label_smoothing = model_data.get("label_smoothing", 0.0)  # 後方互換性
+        self.race_type = model_data.get("race_type", DEFAULT_RACE_TYPE)  # 後方互換性
 
     def get_feature_importance(self) -> pd.DataFrame:
         """
@@ -626,17 +665,21 @@ class HorseRacingPredictor:
         return importance.sort_values("importance", ascending=False)
 
 
-def get_model(version: str = "v1") -> HorseRacingPredictor:
+def get_model(
+    version: str = "v1",
+    race_type: str = DEFAULT_RACE_TYPE,
+) -> HorseRacingPredictor:
     """
     学習済みモデルを取得
 
     Args:
         version: モデルバージョン
+        race_type: レースタイプ（central, local, banei）
 
     Returns:
         学習済みのHorseRacingPredictor
     """
-    predictor = HorseRacingPredictor(model_version=version)
+    predictor = HorseRacingPredictor(model_version=version, race_type=race_type)
 
     try:
         predictor.load()
@@ -645,3 +688,53 @@ def get_model(version: str = "v1") -> HorseRacingPredictor:
         pass
 
     return predictor
+
+
+def list_model_versions(race_type: str = DEFAULT_RACE_TYPE) -> list[dict]:
+    """
+    利用可能なモデルバージョン一覧を取得
+
+    Args:
+        race_type: レースタイプ
+
+    Returns:
+        モデルバージョン情報のリスト
+    """
+    model_dir = get_model_dir(race_type)
+    versions = []
+
+    if not model_dir.exists():
+        return versions
+
+    # レースタイプに応じたパターンでファイルを検索
+    if race_type == DEFAULT_RACE_TYPE:
+        # centralの場合は両方のパターンを検索（後方互換性）
+        patterns = ["model_v*.pkl", "model_central_v*.pkl"]
+    else:
+        patterns = [f"model_{race_type}_v*.pkl"]
+
+    import glob
+    found_files = set()
+    for pattern in patterns:
+        for filepath in model_dir.glob(pattern):
+            if filepath.name not in found_files:
+                found_files.add(filepath.name)
+                # バージョン名を抽出
+                name = filepath.stem  # model_v1 or model_central_v1
+                if name.startswith(f"model_{race_type}_"):
+                    version = name.replace(f"model_{race_type}_", "")
+                else:
+                    version = name.replace("model_", "")
+
+                stat = filepath.stat()
+                versions.append({
+                    "version": version,
+                    "file_path": str(filepath),
+                    "size_bytes": stat.st_size,
+                    "created_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                    "race_type": race_type,
+                })
+
+    # 作成日時の降順でソート
+    versions.sort(key=lambda x: x["created_at"], reverse=True)
+    return versions

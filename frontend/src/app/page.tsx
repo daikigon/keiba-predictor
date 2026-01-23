@@ -1,214 +1,84 @@
+'use client';
+
 import Link from 'next/link';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
-import { Badge } from '@/components/ui/Badge';
-import { RaceList } from '@/components/features/race/RaceList';
-import { ScrapeStatsCard } from '@/components/features/prediction/StatsCard';
-import { getRaces, getScrapeStats, getHistory } from '@/lib/api';
-import { formatDate, formatPercent } from '@/lib/utils';
-import { Calendar, TrendingUp, Target, DollarSign, Database, Cloud } from 'lucide-react';
-import { API_BASE_URL } from '@/lib/constants';
+import { MapPin, Mountain, Snowflake } from 'lucide-react';
 
-export const dynamic = 'force-dynamic';
+const raceTypes = [
+  {
+    id: 'central',
+    name: '中央競馬',
+    description: 'JRA主催の中央競馬予想',
+    icon: MapPin,
+    href: '/central',
+    color: 'bg-blue-500 hover:bg-blue-600',
+    iconBg: 'bg-blue-100',
+    iconColor: 'text-blue-600',
+  },
+  {
+    id: 'local',
+    name: '地方競馬',
+    description: 'NAR主催の地方競馬予想',
+    icon: Mountain,
+    href: '/local',
+    color: 'bg-green-500 hover:bg-green-600',
+    iconBg: 'bg-green-100',
+    iconColor: 'text-green-600',
+    disabled: false,
+  },
+  {
+    id: 'banei',
+    name: 'ばんえい競馬',
+    description: '帯広のばんえい競馬予想',
+    icon: Snowflake,
+    href: '/banei',
+    color: 'bg-purple-500 hover:bg-purple-600',
+    iconBg: 'bg-purple-100',
+    iconColor: 'text-purple-600',
+    disabled: false,
+  },
+];
 
-async function getTodayRaces() {
-  try {
-    const today = new Date().toISOString().split('T')[0];
-    return await getRaces(today);
-  } catch {
-    return { total: 0, races: [] };
-  }
-}
-
-async function getStats() {
-  try {
-    return await getScrapeStats();
-  } catch {
-    return null;
-  }
-}
-
-async function getRecentHistory() {
-  try {
-    return await getHistory({ limit: 5 });
-  } catch {
-    return null;
-  }
-}
-
-async function checkBackendHealth(): Promise<boolean> {
-  if (!API_BASE_URL) return false;
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/v1/stats/scrape`, {
-      cache: 'no-store',
-      signal: AbortSignal.timeout(3000),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
-export default async function DashboardPage() {
-  const [racesData, stats, historyData, isBackendAvailable] = await Promise.all([
-    getTodayRaces(),
-    getStats(),
-    getRecentHistory(),
-    checkBackendHealth(),
-  ]);
-
-  const today = formatDate(new Date().toISOString());
-
+export default function HomePage() {
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-      <div className="mb-8">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">ダッシュボード</h1>
-            <p className="text-gray-500 mt-1">{today}</p>
-          </div>
-          {/* DB接続状態バッジ */}
-          <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium ${
-            isBackendAvailable
-              ? 'bg-green-100 text-green-800'
-              : 'bg-blue-100 text-blue-800'
-          }`}>
-            {isBackendAvailable ? (
-              <>
-                <Database className="w-4 h-4" />
-                ローカルDB接続中
-              </>
-            ) : (
-              <>
-                <Cloud className="w-4 h-4" />
-                Supabase接続中
-              </>
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex flex-col items-center justify-center p-4">
+      <div className="text-center mb-12">
+        <h1 className="text-4xl font-bold text-gray-900 mb-4">競馬予想AI</h1>
+        <p className="text-lg text-gray-600">
+          機械学習を活用した競馬予想アプリケーション
+        </p>
+      </div>
+
+      <div className="grid gap-6 md:grid-cols-3 w-full max-w-4xl">
+        {raceTypes.map((type) => (
+          <Link
+            key={type.id}
+            href={type.disabled ? '#' : type.href}
+            className={`relative block p-6 bg-white rounded-xl shadow-lg transition-all duration-200 ${
+              type.disabled
+                ? 'opacity-50 cursor-not-allowed'
+                : 'hover:shadow-xl hover:-translate-y-1'
+            }`}
+            onClick={(e) => type.disabled && e.preventDefault()}
+          >
+            {type.disabled && (
+              <span className="absolute top-3 right-3 px-2 py-1 text-xs font-medium bg-gray-200 text-gray-600 rounded">
+                準備中
+              </span>
             )}
-          </div>
-        </div>
+            <div className={`w-14 h-14 ${type.iconBg} rounded-xl flex items-center justify-center mb-4`}>
+              <type.icon className={`w-7 h-7 ${type.iconColor}`} />
+            </div>
+            <h2 className="text-xl font-semibold text-gray-900 mb-2">
+              {type.name}
+            </h2>
+            <p className="text-sm text-gray-500">{type.description}</p>
+          </Link>
+        ))}
       </div>
 
-      {/* Stats Overview */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 mb-8">
-        <StatCard
-          icon={<Calendar className="w-5 h-5 text-blue-600" />}
-          label="本日のレース"
-          value={`${racesData.total}件`}
-        />
-        <StatCard
-          icon={<Target className="w-5 h-5 text-green-600" />}
-          label="総予測数"
-          value={stats ? `${stats.total_predictions.toLocaleString()}件` : '-'}
-        />
-        <StatCard
-          icon={<TrendingUp className="w-5 h-5 text-purple-600" />}
-          label="的中率"
-          value={historyData?.summary ? formatPercent(historyData.summary.hit_rate) : '-'}
-        />
-        <StatCard
-          icon={<DollarSign className="w-5 h-5 text-orange-600" />}
-          label="回収率"
-          value={historyData?.summary ? formatPercent(historyData.summary.roi + 100) : '-'}
-        />
-      </div>
-
-      <div className="grid gap-8 lg:grid-cols-3">
-        {/* Today's Races */}
-        <div className="lg:col-span-2">
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle>本日のレース</CardTitle>
-                <Link
-                  href="/races"
-                  className="text-sm text-blue-600 hover:text-blue-800"
-                >
-                  すべて見る
-                </Link>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {racesData.races.length > 0 ? (
-                <RaceList races={racesData.races.slice(0, 6)} />
-              ) : (
-                <div className="text-center py-8 text-gray-500">
-                  本日のレースはありません
-                </div>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* Sidebar */}
-        <div className="space-y-6">
-          {/* Data Stats */}
-          {stats && <ScrapeStatsCard stats={stats} />}
-
-          {/* Recent History */}
-          <Card>
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <CardTitle>最近の予想</CardTitle>
-                <Link
-                  href="/history"
-                  className="text-sm text-blue-600 hover:text-blue-800"
-                >
-                  すべて見る
-                </Link>
-              </div>
-            </CardHeader>
-            <CardContent>
-              {historyData && historyData.items.length > 0 ? (
-                <div className="space-y-3">
-                  {historyData.items.map((item) => (
-                    <div
-                      key={item.id}
-                      className="flex items-center justify-between py-2 border-b last:border-0"
-                    >
-                      <div>
-                        <p className="text-sm font-medium">{item.bet_type}</p>
-                        <p className="text-xs text-gray-500">{item.bet_detail}</p>
-                      </div>
-                      {item.is_hit !== null && (
-                        <Badge variant={item.is_hit ? 'success' : 'danger'}>
-                          {item.is_hit ? '的中' : 'ハズレ'}
-                        </Badge>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-center py-4 text-gray-500 text-sm">
-                  履歴がありません
-                </p>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+      <p className="mt-12 text-sm text-gray-400">
+        予想は参考情報です。馬券購入は自己責任でお願いします。
+      </p>
     </div>
-  );
-}
-
-function StatCard({
-  icon,
-  label,
-  value,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-}) {
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-gray-100 rounded-lg">{icon}</div>
-          <div>
-            <p className="text-sm text-gray-500">{label}</p>
-            <p className="text-xl font-semibold text-gray-900">{value}</p>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
   );
 }

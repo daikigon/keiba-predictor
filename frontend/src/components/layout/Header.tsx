@@ -6,20 +6,43 @@ import { cn } from '@/lib/utils';
 import { Calendar, History, BarChart3, Database, Users, Award, Cpu, LogOut, Shield, Settings } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 
-const navigation = [
-  { name: 'ホーム', href: '/', icon: BarChart3 },
-  { name: 'レース', href: '/races', icon: Calendar },
-  { name: '競走馬一覧', href: '/horses', icon: Award },
-  { name: '騎手一覧', href: '/jockeys', icon: Users },
-  { name: '履歴', href: '/history', icon: History },
-  { name: 'ローカルDB', href: '/data', icon: Database },
-  { name: 'モデル', href: '/model', icon: Cpu },
-  { name: '運用', href: '/operations', icon: Settings },
-];
+function getNavigation(baseUrl: string) {
+  return [
+    { name: 'ホーム', href: baseUrl, icon: BarChart3 },
+    { name: 'レース', href: `${baseUrl}/races`, icon: Calendar },
+    { name: '競走馬', href: `${baseUrl}/horses`, icon: Award },
+    { name: '騎手', href: `${baseUrl}/jockeys`, icon: Users },
+    { name: '履歴', href: `${baseUrl}/history`, icon: History },
+    { name: 'データ', href: `${baseUrl}/data`, icon: Database },
+    { name: 'モデル', href: `${baseUrl}/model`, icon: Cpu },
+    { name: '運用', href: `${baseUrl}/operations`, icon: Settings },
+  ];
+}
+
+const raceTypeLabels: Record<string, string> = {
+  central: '中央競馬',
+  local: '地方競馬',
+  banei: 'ばんえい競馬',
+};
+
+const raceTypeColors: Record<string, { bg: string; text: string; activeBg: string; activeText: string }> = {
+  central: { bg: 'bg-blue-50', text: 'text-blue-700', activeBg: 'bg-blue-50', activeText: 'text-blue-700' },
+  local: { bg: 'bg-green-50', text: 'text-green-700', activeBg: 'bg-green-50', activeText: 'text-green-700' },
+  banei: { bg: 'bg-purple-50', text: 'text-purple-700', activeBg: 'bg-purple-50', activeText: 'text-purple-700' },
+};
 
 export function Header() {
   const pathname = usePathname();
   const { user, signOut } = useAuth();
+
+  // Determine the base URL from the current path
+  const baseUrl = pathname.startsWith('/local') ? '/local'
+    : pathname.startsWith('/banei') ? '/banei'
+    : '/central';
+
+  const raceType = baseUrl.replace('/', '');
+  const navigation = getNavigation(baseUrl);
+  const colors = raceTypeColors[raceType] || raceTypeColors.central;
 
   const handleSignOut = async () => {
     try {
@@ -34,10 +57,17 @@ export function Header() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between h-16">
           <div className="flex">
-            <div className="flex-shrink-0 flex items-center">
+            <div className="flex-shrink-0 flex items-center gap-3">
               <Link href="/" className="text-xl font-bold text-gray-900">
                 競馬予想AI
               </Link>
+              <span className={cn(
+                'px-2 py-0.5 text-xs font-medium rounded',
+                colors.bg,
+                colors.text
+              )}>
+                {raceTypeLabels[raceType]}
+              </span>
             </div>
             <nav className="hidden sm:ml-6 sm:flex sm:space-x-1">
               {navigation.map((item) => {
@@ -50,7 +80,7 @@ export function Header() {
                     className={cn(
                       'inline-flex items-center px-2 py-2 text-sm font-medium rounded-md whitespace-nowrap',
                       isActive
-                        ? 'bg-blue-50 text-blue-700'
+                        ? `${colors.activeBg} ${colors.activeText}`
                         : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
                     )}
                     title={item.name}
@@ -70,7 +100,7 @@ export function Header() {
                 {user.email}
               </span>
               <Link
-                href="/settings/security"
+                href={`${baseUrl}/settings/security`}
                 className="inline-flex items-center p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-md"
                 title="セキュリティ設定"
               >
@@ -100,7 +130,7 @@ export function Header() {
                 href={item.href}
                 className={cn(
                   'flex flex-col items-center px-3 py-2 text-xs',
-                  isActive ? 'text-blue-700' : 'text-gray-600'
+                  isActive ? colors.activeText : 'text-gray-600'
                 )}
               >
                 <item.icon className="w-5 h-5 mb-1" />
