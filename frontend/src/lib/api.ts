@@ -525,6 +525,7 @@ export interface SimulationParams {
   end_date?: string;    // YYYY-MM-DD形式（テスト期間終了）
   min_probability?: number;  // 最低確率フィルター（0-1）
   umaren_top_n?: number;  // 馬連の組み合わせ対象馬数
+  race_type?: string;  // レースタイプ（central, local, banei）
 }
 
 export interface SimulationBetTypeResult {
@@ -537,6 +538,8 @@ export interface SimulationBetTypeResult {
 }
 
 export interface SimulationResult {
+  model_version?: string;
+  num_features?: number;
   total_races: number;
   total_bets: number;
   total_hits: number;
@@ -675,6 +678,7 @@ export interface ThresholdSweepParams {
   limit?: number;
   start_date?: string;
   end_date?: string;
+  race_type?: string;  // レースタイプ（central, local, banei）
 }
 
 export interface ThresholdSweepDataPoint {
@@ -693,6 +697,8 @@ export interface ThresholdSweepDataPoint {
 export interface ThresholdSweepResult {
   bet_type: string;
   total_races: number;
+  model_version?: string;
+  num_features?: number;
   data: ThresholdSweepDataPoint[];
 }
 
@@ -712,6 +718,8 @@ export interface ThresholdSweepStatus {
   total_thresholds: number;
   results: ThresholdSweepResult | null;
   error: string | null;
+  model_version?: string;
+  num_features?: number;
 }
 
 export async function getThresholdSweepStatus(): Promise<ThresholdSweepStatus> {
@@ -727,6 +735,8 @@ export async function runThresholdSweepSync(params: ThresholdSweepParams): Promi
     status: string;
     bet_type: string;
     total_races: number;
+    model_version?: string;
+    num_features?: number;
     data: ThresholdSweepDataPoint[];
   }>('/api/v1/model/simulate/threshold-sweep/sync', {
     method: 'POST',
@@ -736,6 +746,8 @@ export async function runThresholdSweepSync(params: ThresholdSweepParams): Promi
   return {
     bet_type: response.bet_type,
     total_races: response.total_races,
+    model_version: response.model_version,
+    num_features: response.num_features,
     data: response.data,
   };
 }

@@ -21,8 +21,18 @@ from app.db.session import get_db
 from app.logging_config import get_logger
 from app.models import Race, Entry
 from app.services import retraining_service, prediction_service
-from app.services.predictor import FeatureExtractor, get_model
+from app.services.predictor import FeatureExtractor, get_model, LocalFeatureExtractor, BaneiFeatureExtractor
 from app.services.predictor.model import list_model_versions as list_versions_by_type, DEFAULT_RACE_TYPE, RACE_TYPES
+
+
+def get_feature_extractor(db: Session, race_type: str):
+    """レースタイプに応じた特徴量抽出器を取得"""
+    if race_type == "local":
+        return LocalFeatureExtractor(db)
+    elif race_type == "banei":
+        return BaneiFeatureExtractor(db)
+    else:
+        return FeatureExtractor(db)
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -385,6 +395,8 @@ class SimulationParams(BaseModel):
     min_probability: float = 0.01  # デフォルト1%（PDF推奨値）
     # 馬連の組み合わせ対象馬数
     umaren_top_n: int = 3  # 上位3頭（PDF推奨: 組み合わせ爆発防止）
+    # レースタイプ
+    race_type: str = DEFAULT_RACE_TYPE
 
 
 def _calculate_umaren_prob(probabilities: dict, h1: int, h2: int, n_horses: int) -> float:
@@ -421,8 +433,8 @@ def _run_simulation(
         _simulation_status["progress"] = 0
         _simulation_status["error"] = None
 
-        # 現在アクティブなモデルを使用
-        predictor = prediction_service.get_predictor()
+        # 現在アクティブなモデルを使用（レースタイプ別）
+        predictor = prediction_service.get_predictor(params.race_type)
         if predictor.model is None:
             _simulation_status["error"] = "モデルが読み込まれていません"
             _simulation_status["is_running"] = False
@@ -431,10 +443,11 @@ def _run_simulation(
         logger.info(f"Simulation using model version: {predictor.model_version}")
         logger.info(f"Simulation params: start_date={params.start_date}, end_date={params.end_date}, limit={params.limit}")
 
-        # レース取得（期間フィルタ適用）
+        # レース取得（レースタイプと期間でフィルタ）
         stmt = (
             select(Race)
             .where(Race.entries.any(Entry.result.isnot(None)))
+            .where(Race.race_type == params.race_type)
         )
 
         # 期間フィルタ
@@ -455,9 +468,9 @@ def _run_simulation(
         stmt = stmt.order_by(Race.date.desc()).limit(params.limit)
         races = list(db.execute(stmt).scalars().all())
         _simulation_status["total"] = len(races)
-        logger.info(f"Simulation: Retrieved {len(races)} races (limit={params.limit})")
+        logger.info(f"Simulation: Retrieved {len(races)} {params.race_type} races (limit={params.limit})")
 
-        extractor = FeatureExtractor(db)
+        extractor = get_feature_extractor(db, params.race_type)
         all_results = []
         total_bet = 0
         total_payout = 0
@@ -568,6 +581,8 @@ def _run_simulation(
         hit_rate = (total_hits / total_bets_count) * 100 if total_bets_count > 0 else 0
 
         _simulation_status["results"] = {
+            "model_version": predictor.model_version,
+            "num_features": len(predictor.feature_columns),
             "total_races": len(races),
             "total_bets": total_bets_count,
             "total_hits": total_hits,
@@ -696,6 +711,8 @@ _sweep_status = {
     "total_thresholds": 0,
     "results": None,
     "error": None,
+    "model_version": None,
+    "num_features": None,
 }
 
 
@@ -711,6 +728,8 @@ class ThresholdSweepParams(BaseModel):
     limit: int = 500
     start_date: Optional[str] = None
     end_date: Optional[str] = None
+    # レースタイプ
+    race_type: str = DEFAULT_RACE_TYPE
 
 
 def _run_threshold_sweep_async(
@@ -726,11 +745,18 @@ def _run_threshold_sweep_async(
         _sweep_status["error"] = None
         _sweep_status["results"] = None
 
+        # モデル情報を取得（レースタイプ別）
+        predictor = prediction_service.get_predictor(params.race_type)
+        _sweep_status["model_version"] = predictor.model_version
+        _sweep_status["num_features"] = len(predictor.feature_columns) if predictor.feature_columns else None
+
         results = _run_threshold_sweep(db, params)
 
         _sweep_status["results"] = {
             "bet_type": params.bet_type,
             "total_races": params.limit,
+            "model_version": predictor.model_version,
+            "num_features": len(predictor.feature_columns) if predictor.feature_columns else None,
             "data": results,
         }
         _sweep_status["phase"] = "complete"
@@ -753,14 +779,15 @@ def _run_threshold_sweep(
     """
     global _sweep_status
 
-    predictor = prediction_service.get_predictor()
+    predictor = prediction_service.get_predictor(params.race_type)
     if predictor.model is None:
         raise ValueError("モデルが読み込まれていません")
 
-    # レース取得
+    # レース取得（レースタイプでフィルタリング）
     stmt = (
         select(Race)
         .where(Race.entries.any(Entry.result.isnot(None)))
+        .where(Race.race_type == params.race_type)
     )
 
     if params.start_date:
@@ -783,7 +810,7 @@ def _run_threshold_sweep(
     if not races:
         return []
 
-    extractor = FeatureExtractor(db)
+    extractor = get_feature_extractor(db, params.race_type)
 
     # 進捗: データ準備フェーズ
     _sweep_status["phase"] = "preparing"
@@ -1007,12 +1034,15 @@ async def run_threshold_sweep_sync(
 
     try:
         _sweep_status["is_running"] = True
+        predictor = prediction_service.get_predictor(params.race_type)
         results = _run_threshold_sweep(db, params)
 
         return {
             "status": "success",
             "bet_type": params.bet_type,
             "total_races": params.limit,
+            "model_version": predictor.model_version,
+            "num_features": len(predictor.feature_columns) if predictor.feature_columns else None,
             "data": results,
         }
 

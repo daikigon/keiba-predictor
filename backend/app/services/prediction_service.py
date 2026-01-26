@@ -1,7 +1,9 @@
 from datetime import datetime
 from functools import lru_cache
 from itertools import combinations
+from pathlib import Path
 from typing import Optional
+import json
 import time
 
 import numpy as np
@@ -12,17 +14,74 @@ from app.logging_config import get_logger
 from app.models.prediction import Prediction, History
 from app.models.race import Race, Entry
 from app.services.predictor import FeatureExtractor, get_model
-from app.services.predictor.model import DEFAULT_RACE_TYPE, RACE_TYPES
+from app.services.predictor.model import DEFAULT_RACE_TYPE, RACE_TYPES, list_model_versions
 
 logger = get_logger(__name__)
 
-# レースタイプ別のモデルバージョン
+# 選択されたモデルを永続化する設定ファイル
+CONFIG_DIR = Path(__file__).parent.parent.parent / "ml" / "config"
+MODEL_CONFIG_FILE = CONFIG_DIR / "selected_models.json"
+
+
+def _load_selected_models() -> dict[str, str]:
+    """設定ファイルから選択されたモデルバージョンを読み込む"""
+    if MODEL_CONFIG_FILE.exists():
+        try:
+            with open(MODEL_CONFIG_FILE) as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load model config: {e}")
+    return {}
+
+
+def _save_selected_models(versions: dict[str, str]) -> None:
+    """選択されたモデルバージョンを設定ファイルに保存"""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(MODEL_CONFIG_FILE, "w") as f:
+            json.dump(versions, f, indent=2)
+        logger.info(f"Saved model config: {versions}")
+    except Exception as e:
+        logger.error(f"Failed to save model config: {e}")
+
+
+def _get_latest_model_version(race_type: str) -> str:
+    """レースタイプの最新モデルバージョンを取得（なければv1を返す）"""
+    try:
+        versions = list_model_versions(race_type)
+        if versions:
+            return versions[0]["version"]  # 最新（作成日時降順でソート済み）
+    except Exception as e:
+        logger.warning(f"Failed to get latest model version for {race_type}: {e}")
+    return "v1"
+
+
+def _init_model_versions() -> dict[str, str]:
+    """
+    モデルバージョンを初期化
+
+    優先順位:
+    1. 設定ファイルに保存された選択バージョン
+    2. 最新のモデルバージョン
+    3. デフォルト v1
+    """
+    saved_versions = _load_selected_models()
+    versions = {}
+
+    for race_type in RACE_TYPES:
+        if race_type in saved_versions:
+            versions[race_type] = saved_versions[race_type]
+            logger.info(f"Using saved model version for {race_type}: {versions[race_type]}")
+        else:
+            versions[race_type] = _get_latest_model_version(race_type)
+            logger.info(f"Using latest model version for {race_type}: {versions[race_type]}")
+
+    return versions
+
+
+# レースタイプ別のモデルバージョン（動的に初期化）
 MODEL_VERSION = "v1"
-MODEL_VERSIONS: dict[str, str] = {
-    "central": "v1",
-    "local": "v1",
-    "banei": "v1",
-}
+MODEL_VERSIONS: dict[str, str] = _init_model_versions()
 
 # 期待値ベース推奨のデフォルト閾値（PDF推奨値に準拠）
 DEFAULT_EV_THRESHOLD = 1.0  # 期待値が1.0以上で推奨
@@ -128,6 +187,9 @@ def set_predictor(predictor, race_type: str = DEFAULT_RACE_TYPE):
 
     _predictors[race_type] = predictor
     MODEL_VERSIONS[race_type] = predictor.model_version
+
+    # 設定ファイルに永続化
+    _save_selected_models(MODEL_VERSIONS)
 
     # 後方互換性
     if race_type == DEFAULT_RACE_TYPE:

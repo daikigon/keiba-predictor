@@ -18,6 +18,8 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.calibration import CalibratedClassifierCV
 
 from .features import get_feature_columns
+from .features_banei import get_banei_feature_columns
+from .features_local import get_local_feature_columns
 
 
 # モデル保存ディレクトリ
@@ -66,7 +68,13 @@ class HorseRacingPredictor:
         self.model: Optional[lgb.Booster] = None
         self.scaler: Optional[StandardScaler] = None
         self.calibrator: Optional[IsotonicRegression] = None
-        self.feature_columns = get_feature_columns()
+        # レースタイプに応じた特徴量カラムを選択
+        if self.race_type == "banei":
+            self.feature_columns = get_banei_feature_columns()
+        elif self.race_type == "local":
+            self.feature_columns = get_local_feature_columns()
+        else:
+            self.feature_columns = get_feature_columns()
         self.use_calibration = True  # キャリブレーション使用フラグ
         self.label_smoothing = label_smoothing  # ラベルスムージング
 

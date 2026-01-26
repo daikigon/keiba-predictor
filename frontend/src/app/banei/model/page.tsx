@@ -785,6 +785,7 @@ function SimulationSection({ backendAvailable }: { backendAvailable: boolean }) 
         ...simParams,
         start_date: simParams.start_date || undefined,
         end_date: simParams.end_date || undefined,
+        race_type: 'banei',
       };
 
       // 非同期シミュレーション開始
@@ -847,7 +848,7 @@ function SimulationSection({ backendAvailable }: { backendAvailable: boolean }) 
                 <option value="">-- 履歴を選択 --</option>
                 {history.map((h) => (
                   <option key={h.id} value={h.id}>
-                    {h.timestamp} ({h.params.bet_type === 'all' ? '全て' : h.params.bet_type === 'tansho' ? '単勝' : '馬連'}, EV {h.params.ev_threshold}~{h.params.max_ev})
+                    {h.timestamp} ({h.params.bet_type === 'all' ? '全て' : h.params.bet_type === 'tansho' ? '単勝' : '馬連'}, EV {h.params.ev_threshold}~{h.params.max_ev}{h.result.model_version ? `, ${h.result.model_version}` : ''})
                   </option>
                 ))}
               </select>
@@ -1207,6 +1208,7 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
         ...sweepParams,
         start_date: sweepParams.start_date || undefined,
         end_date: sweepParams.end_date || undefined,
+        race_type: 'banei',
       };
       await startThresholdSweep(params);
 
@@ -1266,7 +1268,7 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
                 <option value="">-- 履歴を選択 --</option>
                 {history.map((h) => (
                   <option key={h.id} value={h.id}>
-                    {h.timestamp} ({h.params.bet_type === 'tansho' ? '単勝' : '馬連'}, EV {h.params.ev_min}~{h.params.ev_max}, 確率≥{h.params.min_probability ? Math.round(h.params.min_probability * 100) : 1}%)
+                    {h.timestamp} ({h.params.bet_type === 'tansho' ? '単勝' : '馬連'}, EV {h.params.ev_min}~{h.params.ev_max}{h.result.model_version ? `, ${h.result.model_version}` : ''})
                   </option>
                 ))}
               </select>
@@ -1432,6 +1434,11 @@ function ThresholdSweepSection({ backendAvailable }: { backendAvailable: boolean
             <div className="space-y-4">
               <div className="text-sm text-gray-600">
                 対象: {sweepResult.total_races}レース / {sweepResult.bet_type === 'tansho' ? '単勝' : '馬連'}
+                {sweepResult.model_version && (
+                  <span className="ml-4 text-blue-600">
+                    モデル: {sweepResult.model_version} ({sweepResult.num_features}特徴量)
+                  </span>
+                )}
               </div>
 
               <div className="h-80">
@@ -1581,6 +1588,12 @@ function SimulationResultCard({ results }: { results: SimulationResult }) {
 
   return (
     <div className="space-y-4">
+      {/* Model Info */}
+      {results.model_version && (
+        <div className="text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded inline-block">
+          モデル: {results.model_version} ({results.num_features}特徴量)
+        </div>
+      )}
       {/* Summary */}
       <div className="grid grid-cols-2 gap-3">
         <div className="bg-gray-50 p-3 rounded-lg">

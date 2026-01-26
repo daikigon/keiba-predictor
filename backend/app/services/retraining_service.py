@@ -17,6 +17,16 @@ from app.logging_config import get_logger
 from app.db.base import SessionLocal
 from app.services.predictor import prepare_training_data, prepare_time_split_data, HorseRacingPredictor
 from app.services.predictor.model import MODEL_DIR, DEFAULT_RACE_TYPE, RACE_TYPES
+from app.services.predictor.features_local import (
+    prepare_local_training_data,
+    prepare_local_time_split_data,
+    get_local_feature_columns,
+)
+from app.services.predictor.features_banei import (
+    prepare_banei_training_data,
+    prepare_banei_time_split_data,
+    get_banei_feature_columns,
+)
 
 logger = get_logger(__name__)
 
@@ -282,14 +292,39 @@ def _run_retraining(
                     "total": total,
                 })
 
-            data = prepare_time_split_data(
-                db,
-                train_end_date=train_end_date,
-                valid_end_date=valid_end_date,
-                train_start_date=min_date,
-                progress_callback=data_progress_callback,
-                target_strategy=target_strategy,
-            )
+            # レースタイプに応じた特徴量エンジニアリングを使用
+            if race_type == "local":
+                emit_progress("info", {
+                    "message": "地方競馬専用の特徴量を使用します",
+                })
+                data = prepare_local_time_split_data(
+                    db,
+                    train_end_date=train_end_date,
+                    valid_end_date=valid_end_date,
+                    train_start_date=min_date,
+                    progress_callback=data_progress_callback,
+                    target_strategy=target_strategy,
+                )
+            elif race_type == "banei":
+                emit_progress("info", {
+                    "message": "ばんえい競馬専用の特徴量を使用します",
+                })
+                data = prepare_banei_time_split_data(
+                    db,
+                    train_end_date=train_end_date,
+                    valid_end_date=valid_end_date,
+                    train_start_date=min_date,
+                    progress_callback=data_progress_callback,
+                )
+            else:
+                data = prepare_time_split_data(
+                    db,
+                    train_end_date=train_end_date,
+                    valid_end_date=valid_end_date,
+                    train_start_date=min_date,
+                    progress_callback=data_progress_callback,
+                    target_strategy=target_strategy,
+                )
 
             X_train, y_train = data['train']
             X_valid, y_valid = data['valid']
@@ -358,7 +393,19 @@ def _run_retraining(
                 "message": "従来モード（ランダム分割）",
             })
 
-            X, y = prepare_training_data(db, min_date=min_date, target_strategy=target_strategy)
+            # レースタイプに応じた特徴量エンジニアリングを使用
+            if race_type == "local":
+                emit_progress("info", {
+                    "message": "地方競馬専用の特徴量を使用します",
+                })
+                X, y = prepare_local_training_data(db, min_date=min_date, target_strategy=target_strategy)
+            elif race_type == "banei":
+                emit_progress("info", {
+                    "message": "ばんえい競馬専用の特徴量を使用します",
+                })
+                X, y = prepare_banei_training_data(db, min_date=min_date)
+            else:
+                X, y = prepare_training_data(db, min_date=min_date, target_strategy=target_strategy)
 
             if X.empty:
                 raise ValueError("No training data found")
